@@ -4,5 +4,12 @@
     "api/*.js": {
       "maxDuration": 30
     }
-  }
+  },
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/api/dashboard",
+      "permanent": false
+    }
+  ]
 }
