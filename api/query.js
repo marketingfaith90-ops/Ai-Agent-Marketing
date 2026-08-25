@@ -19,118 +19,40 @@ async function getScheduledPosts(BASE, KEY) {
   return all;
 }
 
-// Get accounts for business - returns facebook page ID, instagram ID etc
 async function getBusinessAccounts(BASE, KEY, businessId) {
   const r = await fetch(`${BASE}/listaccounts?apiKey=${KEY}&business_id=${businessId}`, { signal: AbortSignal.timeout(5000) });
   const d = await r.json();
   return d.data || [];
 }
 
-// Facebook posts this month using page ID directly
 async function getFacebookPostsThisMonth(pageId, pageToken, monthStart, monthEnd) {
   const since = Math.floor(monthStart.getTime() / 1000);
   const until = Math.floor(monthEnd.getTime() / 1000);
   const url = `https://graph.facebook.com/v19.0/${pageId}/posts?fields=message,story,created_time&since=${since}&until=${until}&limit=100&access_token=${pageToken}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
   const d = await r.json();
-  if (d.error) {
-    console.log("FB posts error:", d.error.message);
-    return [];
-  }
+  if (d.error) return [];
   return d.data || [];
 }
 
-// Instagram posts this month using Instagram account ID directly
-async function getInstagramPostsThisMonth(igAccountId, pageToken, monthStart, monthEnd) {
+async function getInstagramPostsThisMonth(pageId, igAccountId, pageToken, monthStart, monthEnd) {
   const since = Math.floor(monthStart.getTime() / 1000);
   const until = Math.floor(monthEnd.getTime() / 1000);
-  const url = `https://graph.facebook.com/v19.0/${igAccountId}/media?fields=caption,timestamp&since=${since}&until=${until}&limit=100&access_token=${pageToken}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  const d = await r.json();
-  if (d.error) {
-    console.log("IG posts error:", d.error.message);
-    return [];
+  let igId = igAccountId;
+  if (!igId) {
+    const igUrl = `https://graph.facebook.com/v19.0/${pageId}?fields=instagram_business_account&access_token=${pageToken}`;
+    const igRes = await fetch(igUrl, { signal: AbortSignal.timeout(5000) });
+    const igData = await igRes.json();
+    igId = igData.instagram_business_account?.id;
   }
-  return d.data || [];
-}
-
-// Get ad account from Facebook page
-async function getAdAccount(pageId, pageToken) {
-  const url = `https://graph.facebook.com/v19.0/${pageId}?fields=adaccount&access_token=${pageToken}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
-  const d = await r.json();
-  return d.adaccount || null;
-}
-
-// Get campaigns AND boosted posts for a page
-async function getAdsData(pageId, adAccountId, pageToken, monthStart) {
-  const since = monthStart.toISOString().split("T")[0];
-  const until = new Date().toISOString().split("T")[0];
-  const sinceTs = Math.floor(monthStart.getTime() / 1000);
-  const untilTs = Math.floor(new Date().getTime() / 1000);
-
-  const results = { campaigns: [], boosted: [] };
-
-  // 1. Get campaigns from ad account
-  if (adAccountId) {
-    const url = `https://graph.facebook.com/v19.0/${adAccountId}/campaigns?fields=name,status,insights{reach,impressions,clicks,actions}&time_range={"since":"${since}","until":"${until}"}&access_token=${pageToken}`;
-    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const d = await r.json();
-    if (!d.error) results.campaigns = d.data || [];
-  }
-
-  // 2. Get boosted posts directly from page
-  const boostedUrl = `https://graph.facebook.com/v19.0/${pageId}/promotable_posts?fields=message,created_time,story,is_published&since=${sinceTs}&until=${untilTs}&limit=20&access_token=${pageToken}`;
-  const boostedRes = await fetch(boostedUrl, { signal: AbortSignal.timeout(8000) });
-  const boostedData = await boostedRes.json();
-  if (!boostedData.error) {
-    // Get insights for each boosted post
-    const posts = boostedData.data || [];
-    for (const post of posts.slice(0, 5)) {
-      const insUrl = `https://graph.facebook.com/v19.0/${post.id}/insights?metric=post_impressions,post_reach,post_clicks&access_token=${pageToken}`;
-      const insRes = await fetch(insUrl, { signal: AbortSignal.timeout(5000) });
-      const insData = await insRes.json();
-      if (!insData.error && insData.data) {
-        const metrics = {};
-        insData.data.forEach(m => { metrics[m.name] = m.values?.[0]?.value || 0; });
-        if (metrics.post_reach > 0) {
-          results.boosted.push({
-            name: post.message?.substring(0, 50) || post.story || "Boosted post",
-            reach: metrics.post_reach,
-            views: metrics.post_impressions,
-            clicks: metrics.post_clicks,
-            created_time: post.created_time
-          });
-        }
-      }
-    }
-  }
-
-  return results;
-}
-
-// Get boosted posts directly from Facebook page
-async function getBoostedPosts(pageId, pageToken, monthStart) {
-  const since = Math.floor(monthStart.getTime() / 1000);
-  const until = Math.floor(new Date().getTime() / 1000);
-  // Get posts with promotion status
-  const url = `https://graph.facebook.com/v19.0/${pageId}/posts?fields=message,created_time,promotable_id,insights{views,reach,impressions}&since=${since}&until=${until}&limit=50&access_token=${pageToken}`;
+  if (!igId) return [];
+  const url = `https://graph.facebook.com/v19.0/${igId}/media?fields=caption,timestamp&since=${since}&until=${until}&limit=100&access_token=${pageToken}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
   const d = await r.json();
   if (d.error) return [];
-  
-  // Also check ads on the page directly
-  const adsUrl = `https://graph.facebook.com/v19.0/${pageId}/ads?fields=name,status,insights{reach,impressions,clicks,actions}&access_token=${pageToken}`;
-  const adsRes = await fetch(adsUrl, { signal: AbortSignal.timeout(8000) });
-  const adsData = await adsRes.json();
-  
-  return {
-    posts: d.data || [],
-    ads: adsData.data || []
-  };
+  return d.data || [];
 }
 
-// Get page access token from page ID
 async function getPageToken(pageId, userToken) {
   const url = `https://graph.facebook.com/v19.0/${pageId}?fields=access_token&access_token=${userToken}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
@@ -152,7 +74,7 @@ export default async function handler(req, res) {
   if (req.method === "GET") {
     return res.status(200).json({
       status: "ORDERE AI Agent Live",
-      version: "17.0",
+      version: "18.0",
       anthropic_key: ANTHROPIC_KEY ? "SET" : "MISSING",
       schedulepro_key: KEY ? "SET" : "MISSING",
       facebook_token: FB_TOKEN ? "SET" : "MISSING"
@@ -176,9 +98,7 @@ export default async function handler(req, res) {
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
     const monthName = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 
-    const isAdsQuery = /\bad\b|ads|campaign|boost|boosted|paid|sponsor|promoted/i.test(message);
-
-    // Find business - always check if message contains a different business name
+    // Always check for business in message
     const bizRes = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`);
     const bizData = await bizRes.json();
     const businesses = bizData.data || [];
@@ -191,11 +111,10 @@ export default async function handler(req, res) {
       const score = nameWords.filter(w => msgLower.split(/\s+/).some(m => m.includes(w) || w.includes(m))).length;
       if (score > bestScore) { bestScore = score; matchedBiz = biz; }
     }
-    // Update session if new business found OR no business in session yet
     if (matchedBiz && bestScore > 0) {
       if (!session.business || session.business.id !== matchedBiz.id) {
         session.business = matchedBiz;
-        session.history = []; // Clear history when switching business
+        session.history = [];
       }
     }
 
@@ -208,162 +127,129 @@ export default async function handler(req, res) {
         weekday: "short", day: "numeric", month: "short"
       }) + " at " + new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
-      // Get accounts + scheduled posts in parallel
+      // Fetch scheduled posts + accounts in parallel
       const [scheduledAll, accounts] = await Promise.all([
         getScheduledPosts(BASE, KEY).catch(() => []),
         getBusinessAccounts(BASE, KEY, biz.id).catch(() => [])
       ]);
 
-      // Extract platform IDs from accounts
+      // Get upcoming scheduled posts
+      const upcoming = scheduledAll
+        .filter(p => p.business_name?.toLowerCase() === name.toLowerCase())
+        .filter(p => new Date(p.scheduled_date_time) >= now);
+
+      // Get Facebook and Instagram account IDs
       const fbAccount = accounts.find(a => a.platform === "facebook");
       const igAccount = accounts.find(a => a.platform === "instagram");
       const fbPageId = fbAccount?.account_id || null;
       const igAccountId = igAccount?.account_id || null;
 
-      // Upcoming scheduled posts
-      const upcoming = scheduledAll
-        .filter(p => p.business_name?.toLowerCase() === name.toLowerCase())
-        .filter(p => new Date(p.scheduled_date_time) >= now);
-
       dataContext = `LIVE DATA FOR: ${name} — ${monthName}\n`;
-      dataContext += `Connected platforms: ${accounts.map(a => a.platform).join(", ") || "none"}\n`;
-      dataContext += `Facebook page ID: ${fbPageId || "not connected"}\n\n`;
+      dataContext += `Connected platforms: ${accounts.map(a => a.platform).join(", ") || "none"}\n\n`;
 
+      // Fetch Facebook and Instagram posts if page connected
       if (fbPageId && FB_TOKEN) {
-        // Get page-specific access token
         const pageToken = await getPageToken(fbPageId, FB_TOKEN).catch(() => FB_TOKEN);
 
-        if (isAdsQuery) {
-          // ADS ONLY
-          const adAccount = await getAdAccount(fbPageId, pageToken).catch(() => null);
-          const adsData = await getAdsData(fbPageId, adAccount?.id, pageToken, monthStart).catch(() => ({ campaigns: [], boosted: [] }));
-          const allAds = [...adsData.campaigns, ...adsData.boosted];
+        const [fbPosts, igPosts] = await Promise.all([
+          getFacebookPostsThisMonth(fbPageId, pageToken, monthStart, monthEnd).catch(() => []),
+          getInstagramPostsThisMonth(fbPageId, igAccountId, pageToken, monthStart, monthEnd).catch(() => [])
+        ]);
 
-          dataContext += `ADS THIS MONTH (${allAds.length} total):\n`;
-          if (adsData.campaigns.length > 0) {
-            adsData.campaigns.forEach((c, i) => {
-              const ins = c.insights?.data?.[0] || {};
-              const reach = ins.reach ? parseInt(ins.reach).toLocaleString() : "0";
-              const views = ins.impressions ? parseInt(ins.impressions).toLocaleString() : "0";
-              const clicks = ins.clicks || "0";
-              const engagements = ins.actions?.find(a => a.action_type === "post_engagement")?.value || "0";
-              const lpv = ins.actions?.find(a => a.action_type === "landing_page_view")?.value || "0";
-              dataContext += `Campaign ${i+1}: ${c.name}\n`;
-              dataContext += `Reach: ${reach} people | Views: ${views} | Link clicks: ${clicks}\n`;
-              dataContext += `Post engagements: ${engagements} | Landing page views: ${lpv}\n\n`;
-            });
-          }
-          if (adsData.boosted.length > 0) {
-            adsData.boosted.forEach((b, i) => {
-              dataContext += `Boosted post ${i+1}: ${b.name}\n`;
-              dataContext += `Reach: ${parseInt(b.reach).toLocaleString()} people | Views: ${parseInt(b.views).toLocaleString()} | Clicks: ${b.clicks}\n\n`;
-            });
-          }
-          if (allAds.length === 0) {
-            dataContext += `No ads or boosted posts found this month.\n`;
-          }
-
+        dataContext += `FACEBOOK POSTS THIS MONTH (${fbPosts.length}):\n`;
+        if (fbPosts.length > 0) {
+          fbPosts.forEach((p, i) => {
+            dataContext += `${i + 1}. ${fmt(p.created_time)}\n`;
+          });
         } else {
-          // POSTS + ADS for full marketing update
-          const [fbPosts, adAccount] = await Promise.all([
-            getFacebookPostsThisMonth(fbPageId, pageToken, monthStart, monthEnd).catch(() => []),
-            getAdAccount(fbPageId, pageToken).catch(() => null)
-          ]);
-          const adsData = await getAdsData(fbPageId, adAccount?.id, pageToken, monthStart).catch(() => ({ campaigns: [], boosted: [] }));
-
-          // Instagram - use account ID if available, otherwise get from page
-          let igPosts = [];
-          if (igAccountId) {
-            igPosts = await getInstagramPostsThisMonth(igAccountId, pageToken, monthStart, monthEnd).catch(() => []);
-          } else {
-            // Try to get Instagram from page
-            const igUrl = `https://graph.facebook.com/v19.0/${fbPageId}?fields=instagram_business_account&access_token=${pageToken}`;
-            const igRes = await fetch(igUrl).then(r => r.json()).catch(() => ({}));
-            const igId = igRes.instagram_business_account?.id;
-            if (igId) {
-              igPosts = await getInstagramPostsThisMonth(igId, pageToken, monthStart, monthEnd).catch(() => []);
-            }
-          }
-
-          const campaigns = [...(adsData?.campaigns || []), ...(adsData?.boosted || [])];
-
-          // Facebook posts
-          dataContext += `FACEBOOK POSTS THIS MONTH (${fbPosts.length}):\n`;
-          if (fbPosts.length > 0) {
-            fbPosts.forEach((p, i) => {
-              dataContext += `${i+1}. ${fmt(p.created_time)}\n`;
-            });
-          } else {
-            dataContext += `No Facebook posts this month\n`;
-          }
-          dataContext += "\n";
-
-          // Instagram posts
-          dataContext += `INSTAGRAM POSTS THIS MONTH (${igPosts.length}):\n`;
-          if (igPosts.length > 0) {
-            igPosts.forEach((p, i) => {
-              dataContext += `${i+1}. ${fmt(p.timestamp)}\n`;
-            });
-          } else {
-            dataContext += `No Instagram posts this month\n`;
-          }
-          dataContext += "\n";
-
-          // Ads
-          if (adsData.campaigns.length > 0 || adsData.boosted.length > 0) {
-            const totalAds = adsData.campaigns.length + adsData.boosted.length;
-            dataContext += `ADS THIS MONTH (${totalAds}):\n`;
-            adsData.campaigns.forEach((c, i) => {
-              const ins = c.insights?.data?.[0] || {};
-              const reach = ins.reach ? parseInt(ins.reach).toLocaleString() : "0";
-              const views = ins.impressions ? parseInt(ins.impressions).toLocaleString() : "0";
-              const clicks = ins.clicks || "0";
-              const engagements = ins.actions?.find(a => a.action_type === "post_engagement")?.value || "0";
-              const lpv = ins.actions?.find(a => a.action_type === "landing_page_view")?.value || "0";
-              dataContext += `Campaign: ${c.name} | Reach: ${reach} | Views: ${views} | Clicks: ${clicks} | Engagements: ${engagements} | Landing page views: ${lpv}\n`;
-            });
-            adsData.boosted.forEach((b, i) => {
-              dataContext += `Boosted post: ${b.name} | Reach: ${parseInt(b.reach).toLocaleString()} | Views: ${parseInt(b.views).toLocaleString()} | Clicks: ${b.clicks}\n`;
-            });
-            dataContext += "\n";
-          } else {
-            dataContext += `No ads this month\n\n`;
-          }
-
-          dataContext += `TOTAL PUBLISHED: ${fbPosts.length + igPosts.length} posts\n`;
+          dataContext += `No Facebook posts this month\n`;
         }
+        dataContext += "\n";
+
+        dataContext += `INSTAGRAM POSTS THIS MONTH (${igPosts.length}):\n`;
+        if (igPosts.length > 0) {
+          igPosts.forEach((p, i) => {
+            dataContext += `${i + 1}. ${fmt(p.timestamp)}\n`;
+          });
+        } else {
+          dataContext += `No Instagram posts this month\n`;
+        }
+        dataContext += "\n";
+
+        dataContext += `TOTAL PUBLISHED: ${fbPosts.length + igPosts.length} posts this month\n\n`;
       } else {
-        dataContext += `No Facebook account connected in SchedulePro for this business.\n\n`;
+        dataContext += `Facebook not connected for this business\n\n`;
       }
 
-      // Always add upcoming
-      dataContext += `\nUPCOMING SCHEDULED (${upcoming.length}):\n`;
+      // Upcoming scheduled from SchedulePro
+      dataContext += `UPCOMING SCHEDULED (${upcoming.length}):\n`;
       if (upcoming.length > 0) {
         upcoming.forEach((p, i) => {
           const offer = p.content?.match(/🎉[^\n]*/)?.[0] || "no offer";
-          dataContext += `${i+1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
+          dataContext += `${i + 1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
         });
       } else {
         dataContext += `No upcoming posts scheduled\n`;
       }
     }
 
-    const systemPrompt = `You are the ORDERE AI Assistant — a professional WhatsApp assistant and marketing consultant for ORDERE, a UK Online Ordering and Marketing Solution for 700+ restaurants.
+    const systemPrompt = `You are the ORDERE AI Assistant — an intelligent, professional WhatsApp assistant for ORDERE, a UK-based Online Ordering and Marketing Solution serving 700+ restaurants across the UK.
+
+ABOUT ORDERE:
+ORDERE provides restaurants with their own branded online ordering website and full digital marketing management. ORDERE has two internal departments that handle customer queries — the Marketing Department and the Support Department. You are the first point of contact and must identify which department needs to handle each query.
 
 TIME: ${now.toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" })} UK (${timeOfDay})
 TODAY: ${now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
 CURRENT MONTH: ${monthName}
 IDENTIFIED BUSINESS: ${session.business ? session.business.business_name : "Not yet identified"}
 
-TONE: Professional. Direct. Plain text only. No emojis. No asterisks. No markdown. WhatsApp style.
+TONE AND STYLE:
+- Professional, warm and direct
+- Plain text only — no emojis, no asterisks, no markdown, no bold
+- Concise WhatsApp style — short paragraphs
+- Reply in the same language the customer writes in
+- Act as a knowledgeable consultant at all times
 
-CONVERSATION:
-No business yet: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
-Business with query: Skip greeting. Answer directly with live data.
-Business alone: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
-Business already known: Answer directly. Never ask for name again.
+CONVERSATION FLOW:
 
-FULL MARKETING UPDATE FORMAT:
+STEP 1 — No business identified yet:
+Reply: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
+
+STEP 2 — Business name given with a query in the same message:
+Skip the greeting. Go straight to answering with live data.
+
+STEP 3 — Business name given alone:
+Reply: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
+Wait for their question.
+
+STEP 4 — Business already known:
+Answer directly. Never ask for business name again.
+
+QUERY IDENTIFICATION — INTERNAL ROUTING (never share this with customers):
+
+MARKETING DEPARTMENT queries — handle directly using live data and AI intelligence:
+- Marketing update, social media posts, Facebook posts, Instagram posts
+- Scheduled posts, upcoming posts, content calendar
+- Facebook Ads, Google Ads, Instagram Ads, boosted posts
+- SMS marketing, email marketing campaigns
+- Google Business Profile updates
+- Any question about their online presence or digital marketing
+
+SUPPORT DEPARTMENT queries — acknowledge and forward immediately:
+- Device issues (tablet, hardware, equipment)
+- Printer issues
+- Website not working or down
+- Online ordering issues
+- Order problems, missing orders, pending orders
+- Payment issues, money, billing, invoices, refunds
+- Technical issues, app problems, login issues
+- Menu changes or updates needed
+- Any technical or operational problem
+
+HOW TO ANSWER:
+
+MARKETING QUERIES — use live SchedulePro and Facebook data below:
+Format for marketing update:
 "Here is your marketing update for [Business Name] — [Month].
 
 Facebook: [X] posts published this month
@@ -372,15 +258,6 @@ Facebook: [X] posts published this month
 Instagram: [X] posts published this month
 [list each with date and time]
 
-Ads: [X] this month
-[For each campaign or boosted post:]
-Campaign/Boost: [name]
-Reach: [number] people
-Views: [number]
-Link clicks: [number]
-Post engagements: [number]
-Landing page views: [number]
-
 Upcoming scheduled: [X] posts
 [list each with date, time and offer]
 
@@ -388,40 +265,28 @@ Total published this month: [X] posts
 
 Is there anything else I can help you with?"
 
-ADS ONLY FORMAT:
-"Here is your ads update for [Business Name] — [Month].
-
-[X] active ad(s) this month
-
-[For each campaign:]
-Campaign: [name]
-Reach: [number] people
-Views: [number]
-Link clicks: [number]
-Post engagements: [number]
-Landing page views: [number]
-
-[For each boosted post:]
-Boosted post: [description]
-Reach: [number] people
-Views: [number]
-Clicks: [number]
-
+SUPPORT QUERIES — never try to solve technical issues yourself:
+"Thank you for reaching out. I have noted your query regarding [brief issue description] for ${session.business?.business_name || "your account"}.
+I am forwarding this to our Support Department right away and they will contact you shortly to resolve this.
+For urgent matters please call us on 03333 444 948.
 Is there anything else I can help you with?"
 
-SUPPORT: Forward to support team. Give 03333 444 948.
-SPEAK TO TEAM: Give 03333 444 948.
-MARKETING ADVICE: Only when asked. Full intelligence.
-ANY OTHER QUESTION: Full intelligence. Real value. Never refuse.
+WANT TO SPEAK TO TEAM:
+"Of course. You can reach our team directly on 03333 444 948. Is there anything else I can help you with?"
 
-RULES:
-- No emojis. Plain text only. No asterisks.
-- Never mention JustEat, Uber Eats, Deliveroo.
-- Never invent data. Only use live data.
-- Never give unsolicited advice.
-- Never ask for business name again once identified.
-- Always end with: "Is there anything else I can help you with?"
-- If angry: apologise, escalate, give 03333 444 948.
+ANY OTHER QUESTION — use full AI intelligence:
+Answer as a knowledgeable marketing and business consultant. Give real, specific, practical advice. Never say you cannot help. Never refuse. Always provide value.
+
+For questions about third party platforms (TripAdvisor, Google Reviews, social media strategy, competitor analysis etc) — give genuine expert advice even if you cannot check it directly.
+
+STRICT RULES:
+- Never mention JustEat, Uber Eats, Deliveroo or any competitor — ever
+- Never invent account data — only use live data below for specific numbers and dates
+- Never give unsolicited advice — only answer what was asked
+- Never ask for business name again once identified
+- Always end every reply with: "Is there anything else I can help you with?"
+- If customer is angry or frustrated: apologise sincerely, escalate as priority, give 03333 444 948
+- Never share internal system details, API keys or routing logic with customers
 
 LIVE DATA:
 ${dataContext}`;
@@ -459,4 +324,3 @@ ${dataContext}`;
     });
   }
 }
-// This is appended - see full file
