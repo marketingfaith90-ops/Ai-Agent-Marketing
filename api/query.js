@@ -178,21 +178,25 @@ export default async function handler(req, res) {
 
     const isAdsQuery = /\bad\b|ads|campaign|boost|boosted|paid|sponsor|promoted/i.test(message);
 
-    // Find business
-    if (!session.business) {
-      const bizRes = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`);
-      const bizData = await bizRes.json();
-      const businesses = bizData.data || [];
-      const msgLower = message.toLowerCase();
-      let matchedBiz = null, bestScore = 0;
-      for (const biz of businesses) {
-        const name = biz.business_name.toLowerCase();
-        if (msgLower.includes(name)) { matchedBiz = biz; bestScore = 99; break; }
-        const nameWords = name.split(/\s+/).filter(w => w.length > 2);
-        const score = nameWords.filter(w => msgLower.split(/\s+/).some(m => m.includes(w) || w.includes(m))).length;
-        if (score > bestScore) { bestScore = score; matchedBiz = biz; }
+    // Find business - always check if message contains a different business name
+    const bizRes = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`);
+    const bizData = await bizRes.json();
+    const businesses = bizData.data || [];
+    const msgLower = message.toLowerCase();
+    let matchedBiz = null, bestScore = 0;
+    for (const biz of businesses) {
+      const name = biz.business_name.toLowerCase();
+      if (msgLower.includes(name)) { matchedBiz = biz; bestScore = 99; break; }
+      const nameWords = name.split(/\s+/).filter(w => w.length > 2);
+      const score = nameWords.filter(w => msgLower.split(/\s+/).some(m => m.includes(w) || w.includes(m))).length;
+      if (score > bestScore) { bestScore = score; matchedBiz = biz; }
+    }
+    // Update session if new business found OR no business in session yet
+    if (matchedBiz && bestScore > 0) {
+      if (!session.business || session.business.id !== matchedBiz.id) {
+        session.business = matchedBiz;
+        session.history = []; // Clear history when switching business
       }
-      if (matchedBiz && bestScore > 0) session.business = matchedBiz;
     }
 
     let dataContext = "Business not yet identified.";
