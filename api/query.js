@@ -64,7 +64,8 @@ function getPlatforms(post) {
   const keys = Object.keys(post.platform_post_ids || {});
   return {
     facebook: keys.some(k => k.startsWith("facebook_")),
-    instagram: keys.some(k => k.startsWith("instagram_"))
+    instagram: keys.some(k => k.startsWith("instagram_")),
+    gmb: keys.some(k => k.startsWith("gmb_") || k.startsWith("google_"))
   };
 }
 
@@ -214,6 +215,9 @@ Facebook: [X] posts published this month
 [list each with date and time]
 
 Instagram: [X] posts published this month
+[list or say none]
+
+Google Business Profile: [X] posts published this month
 [list or say none]
 
 Upcoming scheduled: [X] posts
