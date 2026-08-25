@@ -1,39 +1,44 @@
 const sessions = new Map();
-let cachedPosts = null;
-let cacheTime = null;
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-async function getAllPosts(BASE, KEY) {
-  // Return cache if fresh
-  if (cachedPosts && cacheTime && (Date.now() - cacheTime) < CACHE_TTL) {
-    return cachedPosts;
+// Shared cache across requests
+let globalCache = null;
+let cacheTime = null;
+const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
+async function fetchAllPages(BASE, KEY, endpoint) {
+  let start = 0;
+  let all = [];
+  while (true) {
+    const r = await fetch(`${BASE}/${endpoint}?apiKey=${KEY}&start=${start}`, {
+      signal: AbortSignal.timeout(5000)
+    });
+    const d = await r.json();
+    if (!d.data || d.data.length === 0) break;
+    all = all.concat(d.data);
+    if (d.data.length < 50) break;
+    start += 50;
+    if (start > 2000) break; // safety limit - 2000 posts max
+  }
+  return all;
+}
+
+async function getCache(BASE, KEY) {
+  // Return fresh cache if available
+  if (globalCache && cacheTime && (Date.now() - cacheTime) < CACHE_TTL) {
+    return globalCache;
   }
 
-  // Fetch pages 0, 50, 100, 150 all at once
-  const pages = [0, 50, 100, 150, 200];
-  
-  const [schedPages, pubPages, failPages] = await Promise.all([
-    Promise.all(pages.map(s => 
-      fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=${s}`)
-        .then(r => r.json()).then(d => d.data || []).catch(() => [])
-    )),
-    Promise.all(pages.map(s => 
-      fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=${s}`)
-        .then(r => r.json()).then(d => d.data || []).catch(() => [])
-    )),
-    Promise.all([0].map(s => 
-      fetch(`${BASE}/listfailedposts?apiKey=${KEY}&start=${s}`)
-        .then(r => r.json()).then(d => d.data || []).catch(() => [])
-    ))
+  // Fetch all 3 endpoints fully - all pages, no limit
+  const [scheduled, published, failed] = await Promise.all([
+    fetchAllPages(BASE, KEY, "listscheduledposts"),
+    fetchAllPages(BASE, KEY, "listpublishedposts"),
+    fetchAllPages(BASE, KEY, "listfailedposts")
   ]);
 
-  cachedPosts = {
-    scheduled: schedPages.flat(),
-    published: pubPages.flat(),
-    failed: failPages.flat()
-  };
+  globalCache = { scheduled, published, failed };
   cacheTime = Date.now();
-  return cachedPosts;
+  console.log(`Cache: ${scheduled.length} scheduled, ${published.length} published, ${failed.length} failed`);
+  return globalCache;
 }
 
 export default async function handler(req, res) {
@@ -42,13 +47,19 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
+  const KEY = process.env.SCHEDULEPRO_API_KEY;
+  const BASE = process.env.SCHEDULEPRO_API_URL || "https://scheduler.ordereautomation.xyz/api";
+  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+
   if (req.method === "GET") {
     return res.status(200).json({
       status: "ORDERE AI Agent Live",
-      version: "10.0",
-      anthropic_key: process.env.ANTHROPIC_API_KEY ? "SET" : "MISSING",
-      schedulepro_key: process.env.SCHEDULEPRO_API_KEY ? "SET" : "MISSING",
-      cache: cachedPosts ? `${cachedPosts.scheduled.length} scheduled, ${cachedPosts.published.length} published` : "empty"
+      version: "11.0",
+      anthropic_key: ANTHROPIC_KEY ? "SET" : "MISSING",
+      schedulepro_key: KEY ? "SET" : "MISSING",
+      cache: globalCache
+        ? `${globalCache.scheduled.length} scheduled, ${globalCache.published.length} published — built ${Math.round((Date.now() - cacheTime) / 1000)}s ago`
+        : "empty — will build on first query"
     });
   }
 
@@ -56,10 +67,6 @@ export default async function handler(req, res) {
 
   const { message, sessionId } = req.body || {};
   if (!message) return res.status(400).json({ error: "No message provided" });
-
-  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-  const KEY = process.env.SCHEDULEPRO_API_KEY;
-  const BASE = process.env.SCHEDULEPRO_API_URL || "https://scheduler.ordereautomation.xyz/api";
 
   const sid = sessionId || "default";
   if (!sessions.has(sid)) sessions.set(sid, { history: [], business: null });
@@ -88,7 +95,7 @@ export default async function handler(req, res) {
       if (matchedBiz && bestScore > 0) session.business = matchedBiz;
     }
 
-    // Fetch ALL posts + business accounts in parallel
+    // Build data context
     let dataContext = "Business not yet identified.";
     if (session.business) {
       const biz = session.business;
@@ -99,12 +106,17 @@ export default async function handler(req, res) {
         hour: "2-digit", minute: "2-digit"
       });
 
+      // Get all posts from cache + accounts in parallel
       const [allPosts, accRes] = await Promise.all([
-        getAllPosts(BASE, KEY),
-        fetch(`${BASE}/listaccounts?apiKey=${KEY}&business_id=${biz.id}`).then(r => r.json()).catch(() => ({ data: [] }))
+        getCache(BASE, KEY),
+        fetch(`${BASE}/listaccounts?apiKey=${KEY}&business_id=${biz.id}`)
+          .then(r => r.json()).catch(() => ({ data: [] }))
       ]);
 
-      const match = arr => arr.filter(p => p.business_name?.toLowerCase() === name.toLowerCase());
+      const match = arr => arr.filter(p =>
+        p.business_name?.toLowerCase() === name.toLowerCase()
+      );
+
       const scheduled = match(allPosts.scheduled);
       const published = match(allPosts.published);
       const failed = match(allPosts.failed);
@@ -121,7 +133,7 @@ export default async function handler(req, res) {
         dataContext += `UPCOMING POSTS:\n`;
         upcoming.slice(0, 10).forEach((p, i) => {
           const offer = p.content?.match(/🎉[^\n]*/)?.[0] || "no offer";
-          dataContext += `${i+1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
+          dataContext += `${i + 1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
         });
         dataContext += "\n";
       }
@@ -130,7 +142,7 @@ export default async function handler(req, res) {
         dataContext += `PUBLISHED POSTS:\n`;
         published.slice(0, 10).forEach((p, i) => {
           const offer = p.content?.match(/🎉[^\n]*/)?.[0] || "no offer";
-          dataContext += `${i+1}. ${fmt(p.published_at || p.created_at)} — ${offer}\n`;
+          dataContext += `${i + 1}. ${fmt(p.published_at || p.created_at)} — ${offer}\n`;
         });
         dataContext += "\n";
       }
@@ -138,13 +150,10 @@ export default async function handler(req, res) {
       if (failed.length > 0) {
         dataContext += `FAILED POSTS:\n`;
         failed.forEach((p, i) => {
-          dataContext += `${i+1}. ${fmt(p.created_at)} — ${p.fail_reason || "unknown"}\n`;
+          dataContext += `${i + 1}. ${fmt(p.created_at)} — ${p.fail_reason || "unknown"}\n`;
         });
       }
     }
-
-    const hasQuery = /update|marketing|post|schedule|publish|how many|status|report|platform/i.test(message);
-    const isFirstMessage = session.history.length === 0;
 
     const systemPrompt = `You are the ORDERE AI Assistant — a professional WhatsApp assistant and marketing consultant for ORDERE, a UK Online Ordering and Marketing Solution for 700+ restaurants.
 
@@ -160,52 +169,41 @@ TONE:
 
 CONVERSATION RULES:
 
-RULE 1 — No business identified yet:
-Reply: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
+No business yet: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
 
-RULE 2 — Business name given WITH a query in same message (e.g. "Voujon Indian marketing update"):
-Do NOT say "I found your account." Go straight to answering the query with live data.
+Business given WITH query in same message: Skip greeting. Answer query directly with live data.
 
-RULE 3 — Business name given alone (just name and postcode, no query):
-Reply only: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
-Stop. Wait for their question.
+Business given alone: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
 
-RULE 4 — Business already known, customer asks something:
-Answer directly. Never mention "found your account" again.
+Business already known: Answer directly. Never ask for business name again.
 
 HOW TO ANSWER:
 
-MARKETING UPDATE / POST STATUS:
-Use ONLY the live data. No opinions. No unsolicited advice.
-Reply in this exact format:
+MARKETING UPDATE / STATUS:
+Use ONLY live data. No advice unless asked.
+Format:
 "Here is your current marketing status for [Business Name].
 
 Published posts: [X] total
 Upcoming scheduled: [X] posts
-[List each upcoming post with date, time and offer]
-[If failed posts: Failed posts: X]
+[List each upcoming: date, time, offer]
+[Failed posts if any]
 
 Is there anything else I can help you with?"
 
-MARKETING ADVICE (only when explicitly asked):
-Give specific actionable advice for UK restaurants.
-Reference ORDERE services naturally where relevant.
-Do NOT give advice when customer only asked for data.
+MARKETING ADVICE (only when asked): Specific advice for UK restaurants. Reference ORDERE services.
 
-SUPPORT ISSUES (device, printer, website, orders, payment, billing, technical):
-Reply: "Understood. I have noted your query regarding [issue] for ${session.business?.business_name || "your account"}. I am forwarding this to our Support Team now and they will contact you shortly. For urgent matters please call 03333 444 948. Is there anything else I can help you with?"
+SUPPORT ISSUES: "Understood. I have noted your query regarding [issue] for ${session.business?.business_name || "your account"}. I am forwarding this to our Support Team now and they will contact you shortly. For urgent matters please call 03333 444 948. Is there anything else I can help you with?"
 
-SPEAK TO TEAM:
-"Of course. You can reach our team directly on 03333 444 948. Is there anything else I can help you with?"
+SPEAK TO TEAM: "Of course. You can reach our team directly on 03333 444 948. Is there anything else I can help you with?"
 
-ANY OTHER QUESTION:
-Use full intelligence. Give real value. Never refuse.
+ANY OTHER QUESTION: Use full intelligence. Give real value. Never refuse.
 
-STRICT RULES:
+RULES:
 - No emojis ever
-- Plain text only — no asterisks, no markdown
+- Plain text only
 - Never mention JustEat, Uber Eats, Deliveroo
-- Never invent account data — only use live data for numbers and dates
+- Never invent account data
 - Never give unsolicited advice
 - Never ask for business name again once identified
 - Always end with: "Is there anything else I can help you with?"
@@ -240,7 +238,11 @@ ${dataContext}`;
     session.history.push({ role: "assistant", content: reply });
     if (session.history.length > 20) session.history.splice(0, 2);
 
-    return res.status(200).json({ reply, sessionId: sid, business: session.business?.business_name });
+    return res.status(200).json({
+      reply,
+      sessionId: sid,
+      business: session.business?.business_name
+    });
 
   } catch (err) {
     console.error("Error:", err.message);
