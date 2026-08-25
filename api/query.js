@@ -1,67 +1,54 @@
 const sessions = new Map();
-let bizCache = null;
-let bizCacheTime = null;
-const CACHE_TTL = 15 * 60 * 1000;
-
 const BASE = "https://scheduler.ordereautomation.xyz/api";
 
-async function getBusinesses(KEY) {
-  if (bizCache && bizCacheTime && (Date.now() - bizCacheTime) < CACHE_TTL) return bizCache;
-  const r = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`);
-  const d = await r.json();
-  bizCache = d.data || [];
-  bizCacheTime = Date.now();
-  return bizCache;
-}
-
-async function getPublishedPosts(KEY, businessId, monthStart, monthEnd) {
-  // Fetch with business_id filter - works perfectly as confirmed
+async function getPublishedThisMonth(KEY, businessId, monthStart, monthEnd) {
   let start = 0, all = [];
   while (true) {
-    const r = await fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&business_id=${businessId}&start=${start}`, {
-      signal: AbortSignal.timeout(8000)
-    });
+    const url = `${BASE}/listpublishedposts?apiKey=${KEY}&business_id=${businessId}&start=${start}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const d = await r.json();
     if (d.error || !d.data || d.data.length === 0) break;
-    // Filter to current month only
-    const monthPosts = d.data.filter(p => {
+    const filtered = d.data.filter(p => {
       const date = new Date(p.published_at || p.created_at);
       return date >= monthStart && date <= monthEnd;
     });
-    all = all.concat(monthPosts);
+    all = all.concat(filtered);
+    // Stop if we've gone past this month (posts are newest first)
+    const oldest = d.data[d.data.length - 1];
+    const oldestDate = new Date(oldest.published_at || oldest.created_at);
+    if (oldestDate < monthStart) break;
     if (d.data.length < 50) break;
     start += 50;
   }
   return all;
 }
 
-async function getScheduledPosts(KEY, businessId) {
+async function getUpcomingScheduled(KEY, businessName) {
   const now = new Date();
   let start = 0, all = [];
-  while (start <= 200) {
+  while (start <= 150) {
     const r = await fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=${start}`, {
       signal: AbortSignal.timeout(5000)
     });
     const d = await r.json();
     if (d.error || !d.data || d.data.length === 0) break;
-    // Filter by business name since scheduled doesn't have business_id filter yet
-    const upcoming = d.data.filter(p => {
-      return p.business_name?.toLowerCase() === all._bizName?.toLowerCase() &&
-             new Date(p.scheduled_date_time) >= now;
-    });
-    all = all.concat(upcoming);
+    const matches = d.data.filter(p =>
+      p.business_name?.toLowerCase() === businessName.toLowerCase() &&
+      new Date(p.scheduled_date_time) >= now
+    );
+    all = all.concat(matches);
     if (d.data.length < 50) break;
     start += 50;
   }
   return all;
 }
 
-function extractPlatforms(platformPostIds) {
-  if (!platformPostIds) return { facebook: 0, instagram: 0 };
-  const keys = Object.keys(platformPostIds);
+function getPlatforms(post) {
+  const ids = post.platform_post_ids || {};
+  const keys = Object.keys(ids);
   return {
-    facebook: keys.filter(k => k.startsWith("facebook_")).length,
-    instagram: keys.filter(k => k.startsWith("instagram_")).length
+    facebook: keys.some(k => k.startsWith("facebook_")),
+    instagram: keys.some(k => k.startsWith("instagram_"))
   };
 }
 
@@ -77,7 +64,7 @@ export default async function handler(req, res) {
   if (req.method === "GET") {
     return res.status(200).json({
       status: "ORDERE AI Agent Live",
-      version: "19.0 - SchedulePro only",
+      version: "20.0",
       anthropic_key: ANTHROPIC_KEY ? "SET" : "MISSING",
       schedulepro_key: KEY ? "SET" : "MISSING"
     });
@@ -100,17 +87,24 @@ export default async function handler(req, res) {
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
     const monthName = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 
-    // Find business in message
-    const businesses = await getBusinesses(KEY);
+    // Always try to find business in current message
+    const bizRes = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`);
+    const bizData = await bizRes.json();
+    const businesses = bizData.data || [];
     const msgLower = message.toLowerCase();
     let matchedBiz = null, bestScore = 0;
+
     for (const biz of businesses) {
       const name = biz.business_name.toLowerCase();
       if (msgLower.includes(name)) { matchedBiz = biz; bestScore = 99; break; }
       const nameWords = name.split(/\s+/).filter(w => w.length > 2);
-      const score = nameWords.filter(w => msgLower.split(/\s+/).some(m => m.includes(w) || w.includes(m))).length;
+      const score = nameWords.filter(w =>
+        msgLower.split(/\s+/).some(m => m.includes(w) || w.includes(m))
+      ).length;
       if (score > bestScore) { bestScore = score; matchedBiz = biz; }
     }
+
+    // Only update session business if we found one in THIS message
     if (matchedBiz && bestScore > 0) {
       if (!session.business || session.business.id !== matchedBiz.id) {
         session.business = matchedBiz;
@@ -125,67 +119,48 @@ export default async function handler(req, res) {
       const name = biz.business_name;
       const fmt = d => new Date(d).toLocaleDateString("en-GB", {
         weekday: "short", day: "numeric", month: "short"
-      }) + " at " + new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-
-      // Fetch published posts with business_id filter + scheduled posts in parallel
-      const [publishedPosts, allScheduled] = await Promise.all([
-        getPublishedPosts(KEY, biz.id, monthStart, monthEnd),
-        fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=0`, { signal: AbortSignal.timeout(5000) })
-          .then(r => r.json()).then(d => d.data || []).catch(() => [])
-      ]);
-
-      // Filter scheduled by business name and upcoming
-      const upcoming = allScheduled
-        .filter(p => p.business_name?.toLowerCase() === name.toLowerCase())
-        .filter(p => new Date(p.scheduled_date_time) >= now);
-
-      // Count platforms from published posts
-      let fbCount = 0, igCount = 0;
-      const fbPosts = [], igPosts = [];
-
-      publishedPosts.forEach(p => {
-        const platforms = extractPlatforms(p.platform_post_ids);
-        const date = fmt(p.published_at || p.created_at);
-        const offer = p.content?.match(/🎉[^\n]*/)?.[0] || null;
-        if (platforms.facebook > 0) {
-          fbCount++;
-          fbPosts.push({ date, offer });
-        }
-        if (platforms.instagram > 0) {
-          igCount++;
-          igPosts.push({ date, offer });
-        }
-        // If no specific platform found, count as facebook
-        if (platforms.facebook === 0 && platforms.instagram === 0) {
-          fbCount++;
-          fbPosts.push({ date, offer });
-        }
+      }) + " at " + new Date(d).toLocaleTimeString("en-GB", {
+        hour: "2-digit", minute: "2-digit"
       });
 
-      dataContext = `LIVE DATA FOR: ${name} — ${monthName}\n\n`;
+      // Fetch published + scheduled in parallel
+      const [published, upcoming] = await Promise.all([
+        getPublishedThisMonth(KEY, biz.id, monthStart, monthEnd),
+        getUpcomingScheduled(KEY, name)
+      ]);
 
-      dataContext += `FACEBOOK POSTS THIS MONTH (${fbCount}):\n`;
-      if (fbPosts.length > 0) {
-        fbPosts.forEach((p, i) => {
-          dataContext += `${i+1}. ${p.date}\n`;
-          if (p.offer) dataContext += `   ${p.offer}\n`;
-        });
-      } else {
-        dataContext += `No Facebook posts this month\n`;
-      }
+      // Split by platform
+      const fbPosts = published.filter(p => getPlatforms(p).facebook);
+      const igPosts = published.filter(p => getPlatforms(p).instagram);
+      // Posts with no platform tag count as facebook
+      const noPlatformPosts = published.filter(p => {
+        const plat = getPlatforms(p);
+        return !plat.facebook && !plat.instagram;
+      });
+      const totalFb = fbPosts.length + noPlatformPosts.length;
+      const totalIg = igPosts.length;
+
+      dataContext = `LIVE DATA FOR: ${name} — ${monthName}\n`;
+      dataContext += `Business ID: ${biz.id}\n\n`;
+
+      dataContext += `FACEBOOK POSTS THIS MONTH (${totalFb}):\n`;
+      [...fbPosts, ...noPlatformPosts].forEach((p, i) => {
+        const offer = p.content?.match(/🎉[^\n]*/)?.[0] || null;
+        dataContext += `${i+1}. ${fmt(p.published_at || p.created_at)}${offer ? ' — ' + offer : ''}\n`;
+      });
       dataContext += "\n";
 
-      dataContext += `INSTAGRAM POSTS THIS MONTH (${igCount}):\n`;
+      dataContext += `INSTAGRAM POSTS THIS MONTH (${totalIg}):\n`;
       if (igPosts.length > 0) {
         igPosts.forEach((p, i) => {
-          dataContext += `${i+1}. ${p.date}\n`;
+          dataContext += `${i+1}. ${fmt(p.published_at || p.created_at)}\n`;
         });
       } else {
         dataContext += `No Instagram posts this month\n`;
       }
       dataContext += "\n";
 
-      dataContext += `TOTAL PUBLISHED: ${publishedPosts.length} posts this month\n\n`;
+      dataContext += `TOTAL PUBLISHED: ${published.length} posts\n\n`;
 
       dataContext += `UPCOMING SCHEDULED (${upcoming.length}):\n`;
       if (upcoming.length > 0) {
@@ -198,46 +173,31 @@ export default async function handler(req, res) {
       }
     }
 
-    const systemPrompt = `You are the ORDERE AI Assistant — an intelligent, professional WhatsApp assistant for ORDERE, a UK-based Online Ordering and Marketing Solution serving 700+ restaurants across the UK.
+    const systemPrompt = `You are the ORDERE AI Assistant — an intelligent, professional WhatsApp assistant for ORDERE, a UK-based Online Ordering and Marketing Solution serving 700+ restaurants.
 
-ABOUT ORDERE:
-ORDERE provides restaurants with their own branded online ordering website and full digital marketing management. ORDERE has two internal departments — Marketing Department and Support Department. You are the first point of contact and must identify which department handles each query.
+ABOUT ORDERE: Provides branded ordering websites and full digital marketing. Two departments: Marketing and Support.
 
 TIME: ${now.toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" })} UK (${timeOfDay})
 TODAY: ${now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
 CURRENT MONTH: ${monthName}
 IDENTIFIED BUSINESS: ${session.business ? session.business.business_name : "Not yet identified"}
 
-TONE: Professional, warm and direct. Plain text only. No emojis. No asterisks. No markdown. WhatsApp style.
+TONE: Professional and direct. Plain text only. No emojis. No asterisks. No markdown. WhatsApp style.
 
-CONVERSATION FLOW:
-
+CONVERSATION:
 No business yet: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
+Business with query in same message: Skip greeting. Answer directly.
+Business name alone: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
+Business already known: Answer directly using the LIVE DATA below.
 
-Business given WITH query: Skip greeting. Answer directly with live data.
-
-Business given alone: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
-
-Business already known: Answer directly. Never ask for name again.
-
-QUERY TYPES — INTERNAL ROUTING (never share with customers):
-
-MARKETING DEPARTMENT — handle with live data and AI intelligence:
-Marketing update, social media posts, Facebook, Instagram, Google Business Profile, scheduled posts, upcoming posts, content, SMS marketing, email marketing, Google Ads, Facebook Ads, boosted posts, online presence, digital marketing
-
-SUPPORT DEPARTMENT — acknowledge and forward:
-Device issues, printer, website down, online ordering issues, missing orders, pending orders, payment, billing, money, invoices, refunds, technical issues, app problems, login, menu changes, any operational problem
-
-HOW TO ANSWER:
-
-MARKETING UPDATE — use live data only, no unsolicited advice:
+MARKETING UPDATE FORMAT (use exact live data — no guessing):
 "Here is your marketing update for [Business Name] — [Month].
 
 Facebook: [X] posts published this month
 [list each with date and time]
 
 Instagram: [X] posts published this month
-[list each with date and time]
+[list each with date and time — or say "No Instagram posts this month"]
 
 Upcoming scheduled: [X] posts
 [list each with date, time and offer]
@@ -247,23 +207,20 @@ Total published this month: [X] posts
 Is there anything else I can help you with?"
 
 SUPPORT QUERY:
-"Thank you for reaching out. I have noted your query regarding [brief issue] for ${session.business?.business_name || "your account"}.
-I am forwarding this to our Support Department right away and they will contact you shortly.
-For urgent matters please call 03333 444 948.
-Is there anything else I can help you with?"
+"Thank you for reaching out. I have noted your query regarding [issue] for ${session.business?.business_name || "your account"}. I am forwarding this to our Support Department right away and they will contact you shortly. For urgent matters please call 03333 444 948. Is there anything else I can help you with?"
 
 SPEAK TO TEAM: "Of course. You can reach our team on 03333 444 948. Is there anything else I can help you with?"
 
-ANY OTHER QUESTION: Use full AI intelligence as a marketing and business consultant. Give real, specific, practical advice. Never refuse. Never say you cannot help.
+ANY OTHER QUESTION: Full AI intelligence as marketing consultant. Give real value. Never refuse.
 
-RULES:
-- No emojis. Plain text only. No asterisks.
-- Never mention JustEat, Uber Eats, Deliveroo or any competitor.
-- Never invent data — only use live data for numbers and dates.
-- Never give unsolicited advice.
-- Never ask for business name again once identified.
+CRITICAL RULES:
+- Only use the LIVE DATA below — never invent numbers or dates
+- The business is ${session.business ? session.business.business_name : "not yet identified"} — do not mix up with other businesses
+- Never mention JustEat, Uber Eats, Deliveroo
+- Never give unsolicited advice
+- Never ask for business name again once identified
 - Always end with: "Is there anything else I can help you with?"
-- If angry: apologise sincerely, escalate, give 03333 444 948.
+- If angry: apologise, escalate, give 03333 444 948
 
 LIVE DATA:
 ${dataContext}`;
@@ -291,7 +248,12 @@ ${dataContext}`;
     session.history.push({ role: "assistant", content: reply });
     if (session.history.length > 20) session.history.splice(0, 2);
 
-    return res.status(200).json({ reply, sessionId: sid, business: session.business?.business_name });
+    return res.status(200).json({
+      reply,
+      sessionId: sid,
+      business: session.business?.business_name,
+      data_check: session.business ? `Fetching for: ${session.business.business_name} (${session.business.id})` : "no business"
+    });
 
   } catch (err) {
     console.error("Error:", err.message);
