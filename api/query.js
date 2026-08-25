@@ -19,41 +19,42 @@ async function getScheduledPosts(BASE, KEY) {
   return all;
 }
 
-async function findFacebookPage(businessName, userToken) {
-  const url = `https://graph.facebook.com/v19.0/me/accounts?limit=200&access_token=${userToken}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+// Get accounts for business - returns facebook page ID, instagram ID etc
+async function getBusinessAccounts(BASE, KEY, businessId) {
+  const r = await fetch(`${BASE}/listaccounts?apiKey=${KEY}&business_id=${businessId}`, { signal: AbortSignal.timeout(5000) });
   const d = await r.json();
-  if (!d.data) return null;
-  const nameLower = businessName.toLowerCase();
-  return d.data.find(p =>
-    p.name?.toLowerCase().includes(nameLower) ||
-    nameLower.includes(p.name?.toLowerCase())
-  ) || null;
+  return d.data || [];
 }
 
+// Facebook posts this month using page ID directly
 async function getFacebookPostsThisMonth(pageId, pageToken, monthStart, monthEnd) {
   const since = Math.floor(monthStart.getTime() / 1000);
   const until = Math.floor(monthEnd.getTime() / 1000);
   const url = `https://graph.facebook.com/v19.0/${pageId}/posts?fields=message,story,created_time&since=${since}&until=${until}&limit=100&access_token=${pageToken}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
   const d = await r.json();
+  if (d.error) {
+    console.log("FB posts error:", d.error.message);
+    return [];
+  }
   return d.data || [];
 }
 
-async function getInstagramPostsThisMonth(pageId, pageToken, monthStart, monthEnd) {
-  const igUrl = `https://graph.facebook.com/v19.0/${pageId}?fields=instagram_business_account&access_token=${pageToken}`;
-  const igRes = await fetch(igUrl, { signal: AbortSignal.timeout(5000) });
-  const igData = await igRes.json();
-  const igId = igData.instagram_business_account?.id;
-  if (!igId) return [];
+// Instagram posts this month using Instagram account ID directly
+async function getInstagramPostsThisMonth(igAccountId, pageToken, monthStart, monthEnd) {
   const since = Math.floor(monthStart.getTime() / 1000);
   const until = Math.floor(monthEnd.getTime() / 1000);
-  const url = `https://graph.facebook.com/v19.0/${igId}/media?fields=caption,timestamp&since=${since}&until=${until}&limit=100&access_token=${pageToken}`;
+  const url = `https://graph.facebook.com/v19.0/${igAccountId}/media?fields=caption,timestamp&since=${since}&until=${until}&limit=100&access_token=${pageToken}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
   const d = await r.json();
+  if (d.error) {
+    console.log("IG posts error:", d.error.message);
+    return [];
+  }
   return d.data || [];
 }
 
+// Get ad account from Facebook page
 async function getAdAccount(pageId, pageToken) {
   const url = `https://graph.facebook.com/v19.0/${pageId}?fields=adaccount&access_token=${pageToken}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
@@ -61,13 +62,26 @@ async function getAdAccount(pageId, pageToken) {
   return d.adaccount || null;
 }
 
+// Get campaigns for ad account
 async function getAdCampaigns(adAccountId, pageToken, monthStart) {
   const since = monthStart.toISOString().split("T")[0];
   const until = new Date().toISOString().split("T")[0];
-  const url = `https://graph.facebook.com/v19.0/${adAccountId}/campaigns?fields=name,status,objective,insights{reach,impressions,clicks,spend,actions}&time_range={"since":"${since}","until":"${until}"}&access_token=${pageToken}`;
+  const url = `https://graph.facebook.com/v19.0/${adAccountId}/campaigns?fields=name,status,insights{reach,impressions,clicks,actions}&time_range={"since":"${since}","until":"${until}"}&access_token=${pageToken}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
   const d = await r.json();
+  if (d.error) {
+    console.log("Ads error:", d.error.message);
+    return [];
+  }
   return d.data || [];
+}
+
+// Get page access token from page ID
+async function getPageToken(pageId, userToken) {
+  const url = `https://graph.facebook.com/v19.0/${pageId}?fields=access_token&access_token=${userToken}`;
+  const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+  const d = await r.json();
+  return d.access_token || userToken;
 }
 
 export default async function handler(req, res) {
@@ -84,7 +98,7 @@ export default async function handler(req, res) {
   if (req.method === "GET") {
     return res.status(200).json({
       status: "ORDERE AI Agent Live",
-      version: "16.0",
+      version: "17.0",
       anthropic_key: ANTHROPIC_KEY ? "SET" : "MISSING",
       schedulepro_key: KEY ? "SET" : "MISSING",
       facebook_token: FB_TOKEN ? "SET" : "MISSING"
@@ -108,10 +122,7 @@ export default async function handler(req, res) {
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
     const monthName = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 
-    // Detect query type
     const isAdsQuery = /\bad\b|ads|campaign|boost|boosted|paid|sponsor|promoted/i.test(message);
-    const isMarketingQuery = /marketing|post|schedule|publish|update|status/i.test(message);
-    const isFullUpdate = isMarketingQuery && !isAdsQuery;
 
     // Find business
     if (!session.business) {
@@ -139,27 +150,34 @@ export default async function handler(req, res) {
         weekday: "short", day: "numeric", month: "short"
       }) + " at " + new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
-      // Always fetch page + scheduled
-      const [scheduledAll, fbPage, accRes] = await Promise.all([
+      // Get accounts + scheduled posts in parallel
+      const [scheduledAll, accounts] = await Promise.all([
         getScheduledPosts(BASE, KEY).catch(() => []),
-        FB_TOKEN ? findFacebookPage(name, FB_TOKEN).catch(() => null) : Promise.resolve(null),
-        fetch(`${BASE}/listaccounts?apiKey=${KEY}&business_id=${biz.id}`).then(r => r.json()).catch(() => ({ data: [] }))
+        getBusinessAccounts(BASE, KEY, biz.id).catch(() => [])
       ]);
 
+      // Extract platform IDs from accounts
+      const fbAccount = accounts.find(a => a.platform === "facebook");
+      const igAccount = accounts.find(a => a.platform === "instagram");
+      const fbPageId = fbAccount?.account_id || null;
+      const igAccountId = igAccount?.account_id || null;
+
+      // Upcoming scheduled posts
       const upcoming = scheduledAll
         .filter(p => p.business_name?.toLowerCase() === name.toLowerCase())
         .filter(p => new Date(p.scheduled_date_time) >= now);
 
-      const accounts = accRes.data || [];
-      const pageToken = fbPage?.access_token || FB_TOKEN;
+      dataContext = `LIVE DATA FOR: ${name} — ${monthName}\n`;
+      dataContext += `Connected platforms: ${accounts.map(a => a.platform).join(", ") || "none"}\n`;
+      dataContext += `Facebook page ID: ${fbPageId || "not connected"}\n\n`;
 
-      dataContext = `LIVE DATA FOR: ${name} — ${monthName}\n\n`;
+      if (fbPageId && FB_TOKEN) {
+        // Get page-specific access token
+        const pageToken = await getPageToken(fbPageId, FB_TOKEN).catch(() => FB_TOKEN);
 
-      if (fbPage) {
-        // Fetch posts + ads based on query type
         if (isAdsQuery) {
           // ADS ONLY
-          const adAccount = await getAdAccount(fbPage.id, pageToken).catch(() => null);
+          const adAccount = await getAdAccount(fbPageId, pageToken).catch(() => null);
           let campaigns = [];
           if (adAccount) {
             campaigns = await getAdCampaigns(adAccount.id, pageToken, monthStart).catch(() => []);
@@ -172,10 +190,6 @@ export default async function handler(req, res) {
               const reach = ins.reach ? parseInt(ins.reach).toLocaleString() : "0";
               const views = ins.impressions ? parseInt(ins.impressions).toLocaleString() : "0";
               const clicks = ins.clicks || "0";
-              const spend = ins.spend ? `£${parseFloat(ins.spend).toFixed(2)}` : "£0";
-              const cpc = ins.clicks && ins.spend
-                ? `£${(parseFloat(ins.spend) / parseInt(ins.clicks)).toFixed(2)}`
-                : "N/A";
               const engagements = ins.actions?.find(a => a.action_type === "post_engagement")?.value || "0";
               const lpv = ins.actions?.find(a => a.action_type === "landing_page_view")?.value || "0";
 
@@ -191,12 +205,25 @@ export default async function handler(req, res) {
           }
 
         } else {
-          // POSTS + ADS TOGETHER for full marketing update
-          const [fbPosts, igPosts, adAccount] = await Promise.all([
-            getFacebookPostsThisMonth(fbPage.id, pageToken, monthStart, monthEnd).catch(() => []),
-            getInstagramPostsThisMonth(fbPage.id, pageToken, monthStart, monthEnd).catch(() => []),
-            getAdAccount(fbPage.id, pageToken).catch(() => null)
+          // POSTS + ADS for full marketing update
+          const [fbPosts, adAccount] = await Promise.all([
+            getFacebookPostsThisMonth(fbPageId, pageToken, monthStart, monthEnd).catch(() => []),
+            getAdAccount(fbPageId, pageToken).catch(() => null)
           ]);
+
+          // Instagram - use account ID if available, otherwise get from page
+          let igPosts = [];
+          if (igAccountId) {
+            igPosts = await getInstagramPostsThisMonth(igAccountId, pageToken, monthStart, monthEnd).catch(() => []);
+          } else {
+            // Try to get Instagram from page
+            const igUrl = `https://graph.facebook.com/v19.0/${fbPageId}?fields=instagram_business_account&access_token=${pageToken}`;
+            const igRes = await fetch(igUrl).then(r => r.json()).catch(() => ({}));
+            const igId = igRes.instagram_business_account?.id;
+            if (igId) {
+              igPosts = await getInstagramPostsThisMonth(igId, pageToken, monthStart, monthEnd).catch(() => []);
+            }
+          }
 
           let campaigns = [];
           if (adAccount) {
@@ -225,7 +252,7 @@ export default async function handler(req, res) {
           }
           dataContext += "\n";
 
-          // Ads summary
+          // Ads
           if (campaigns.length > 0) {
             dataContext += `ADS CAMPAIGNS THIS MONTH (${campaigns.length}):\n`;
             campaigns.forEach((c, i) => {
@@ -233,28 +260,23 @@ export default async function handler(req, res) {
               const reach = ins.reach ? parseInt(ins.reach).toLocaleString() : "0";
               const views = ins.impressions ? parseInt(ins.impressions).toLocaleString() : "0";
               const clicks = ins.clicks || "0";
-              const spend = ins.spend ? `£${parseFloat(ins.spend).toFixed(2)}` : "£0";
-              const cpc = ins.clicks && ins.spend
-                ? `£${(parseFloat(ins.spend) / parseInt(ins.clicks)).toFixed(2)}`
-                : "N/A";
               const engagements = ins.actions?.find(a => a.action_type === "post_engagement")?.value || "0";
               const lpv = ins.actions?.find(a => a.action_type === "landing_page_view")?.value || "0";
 
               dataContext += `Campaign ${i+1}: ${c.name}\n`;
-              dataContext += `Reach: ${reach} | Views: ${views}\n`;
-              dataContext += `Clicks: ${clicks} | Engagements: ${engagements} | Landing page views: ${lpv}\n\n`;
+              dataContext += `Reach: ${reach} | Views: ${views} | Clicks: ${clicks} | Engagements: ${engagements} | Landing page views: ${lpv}\n\n`;
             });
           } else {
-            dataContext += `ADS: No campaigns this month\n\n`;
+            dataContext += `No ad campaigns this month\n\n`;
           }
 
           dataContext += `TOTAL PUBLISHED: ${fbPosts.length + igPosts.length} posts\n`;
         }
       } else {
-        dataContext += `Facebook page not found for: ${name}\n\n`;
+        dataContext += `No Facebook account connected in SchedulePro for this business.\n\n`;
       }
 
-      // Always add upcoming scheduled
+      // Always add upcoming
       dataContext += `\nUPCOMING SCHEDULED (${upcoming.length}):\n`;
       if (upcoming.length > 0) {
         upcoming.forEach((p, i) => {
@@ -285,10 +307,10 @@ FULL MARKETING UPDATE FORMAT:
 "Here is your marketing update for [Business Name] — [Month].
 
 Facebook: [X] posts published this month
-[list dates only, no captions]
+[list each with date and time]
 
 Instagram: [X] posts published this month
-[list dates only, no captions]
+[list each with date and time]
 
 Ads Campaigns: [X] this month
 [For each campaign:]
@@ -300,7 +322,7 @@ Post engagements: [number]
 Landing page views: [number]
 
 Upcoming scheduled: [X] posts
-[list dates and offers]
+[list each with date, time and offer]
 
 Total published this month: [X] posts
 
@@ -311,7 +333,6 @@ ADS ONLY FORMAT:
 
 [X] Ads Campaign(s)
 
-[For each:]
 Campaign: [name]
 Reach: [number] people
 Views: [number]
