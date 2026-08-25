@@ -1,63 +1,68 @@
 const sessions = new Map();
-let spCache = null;
-let spCacheTime = null;
+let bizCache = null;
+let bizCacheTime = null;
 const CACHE_TTL = 15 * 60 * 1000;
 
-async function getScheduledPosts(BASE, KEY) {
-  if (spCache && spCacheTime && (Date.now() - spCacheTime) < CACHE_TTL) return spCache;
+const BASE = "https://scheduler.ordereautomation.xyz/api";
+
+async function getBusinesses(KEY) {
+  if (bizCache && bizCacheTime && (Date.now() - bizCacheTime) < CACHE_TTL) return bizCache;
+  const r = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`);
+  const d = await r.json();
+  bizCache = d.data || [];
+  bizCacheTime = Date.now();
+  return bizCache;
+}
+
+async function getPublishedPosts(KEY, businessId, monthStart, monthEnd) {
+  // Fetch with business_id filter - works perfectly as confirmed
   let start = 0, all = [];
-  while (start <= 300) {
-    const r = await fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=${start}`, { signal: AbortSignal.timeout(5000) });
+  while (true) {
+    const r = await fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&business_id=${businessId}&start=${start}`, {
+      signal: AbortSignal.timeout(8000)
+    });
     const d = await r.json();
-    if (!d.data || d.data.length === 0) break;
-    all = all.concat(d.data);
+    if (d.error || !d.data || d.data.length === 0) break;
+    // Filter to current month only
+    const monthPosts = d.data.filter(p => {
+      const date = new Date(p.published_at || p.created_at);
+      return date >= monthStart && date <= monthEnd;
+    });
+    all = all.concat(monthPosts);
     if (d.data.length < 50) break;
     start += 50;
   }
-  spCache = all;
-  spCacheTime = Date.now();
   return all;
 }
 
-async function getBusinessAccounts(BASE, KEY, businessId) {
-  const r = await fetch(`${BASE}/listaccounts?apiKey=${KEY}&business_id=${businessId}`, { signal: AbortSignal.timeout(5000) });
-  const d = await r.json();
-  return d.data || [];
-}
-
-async function getFacebookPostsThisMonth(pageId, pageToken, monthStart, monthEnd) {
-  const since = Math.floor(monthStart.getTime() / 1000);
-  const until = Math.floor(monthEnd.getTime() / 1000);
-  const url = `https://graph.facebook.com/v19.0/${pageId}/posts?fields=message,story,created_time&since=${since}&until=${until}&limit=100&access_token=${pageToken}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  const d = await r.json();
-  if (d.error) return [];
-  return d.data || [];
-}
-
-async function getInstagramPostsThisMonth(pageId, igAccountId, pageToken, monthStart, monthEnd) {
-  const since = Math.floor(monthStart.getTime() / 1000);
-  const until = Math.floor(monthEnd.getTime() / 1000);
-  let igId = igAccountId;
-  if (!igId) {
-    const igUrl = `https://graph.facebook.com/v19.0/${pageId}?fields=instagram_business_account&access_token=${pageToken}`;
-    const igRes = await fetch(igUrl, { signal: AbortSignal.timeout(5000) });
-    const igData = await igRes.json();
-    igId = igData.instagram_business_account?.id;
+async function getScheduledPosts(KEY, businessId) {
+  const now = new Date();
+  let start = 0, all = [];
+  while (start <= 200) {
+    const r = await fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=${start}`, {
+      signal: AbortSignal.timeout(5000)
+    });
+    const d = await r.json();
+    if (d.error || !d.data || d.data.length === 0) break;
+    // Filter by business name since scheduled doesn't have business_id filter yet
+    const upcoming = d.data.filter(p => {
+      return p.business_name?.toLowerCase() === all._bizName?.toLowerCase() &&
+             new Date(p.scheduled_date_time) >= now;
+    });
+    all = all.concat(upcoming);
+    if (d.data.length < 50) break;
+    start += 50;
   }
-  if (!igId) return [];
-  const url = `https://graph.facebook.com/v19.0/${igId}/media?fields=caption,timestamp&since=${since}&until=${until}&limit=100&access_token=${pageToken}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  const d = await r.json();
-  if (d.error) return [];
-  return d.data || [];
+  return all;
 }
 
-async function getPageToken(pageId, userToken) {
-  const url = `https://graph.facebook.com/v19.0/${pageId}?fields=access_token&access_token=${userToken}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
-  const d = await r.json();
-  return d.access_token || userToken;
+function extractPlatforms(platformPostIds) {
+  if (!platformPostIds) return { facebook: 0, instagram: 0 };
+  const keys = Object.keys(platformPostIds);
+  return {
+    facebook: keys.filter(k => k.startsWith("facebook_")).length,
+    instagram: keys.filter(k => k.startsWith("instagram_")).length
+  };
 }
 
 export default async function handler(req, res) {
@@ -67,17 +72,14 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
 
   const KEY = process.env.SCHEDULEPRO_API_KEY;
-  const BASE = process.env.SCHEDULEPRO_API_URL || "https://scheduler.ordereautomation.xyz/api";
   const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-  const FB_TOKEN = process.env.FACEBOOK_ACCESS_TOKEN;
 
   if (req.method === "GET") {
     return res.status(200).json({
       status: "ORDERE AI Agent Live",
-      version: "18.0",
+      version: "19.0 - SchedulePro only",
       anthropic_key: ANTHROPIC_KEY ? "SET" : "MISSING",
-      schedulepro_key: KEY ? "SET" : "MISSING",
-      facebook_token: FB_TOKEN ? "SET" : "MISSING"
+      schedulepro_key: KEY ? "SET" : "MISSING"
     });
   }
 
@@ -98,10 +100,8 @@ export default async function handler(req, res) {
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
     const monthName = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 
-    // Always check for business in message
-    const bizRes = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`);
-    const bizData = await bizRes.json();
-    const businesses = bizData.data || [];
+    // Find business in message
+    const businesses = await getBusinesses(KEY);
     const msgLower = message.toLowerCase();
     let matchedBiz = null, bestScore = 0;
     for (const biz of businesses) {
@@ -127,66 +127,71 @@ export default async function handler(req, res) {
         weekday: "short", day: "numeric", month: "short"
       }) + " at " + new Date(d).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
-      // Fetch scheduled posts + accounts in parallel
-      const [scheduledAll, accounts] = await Promise.all([
-        getScheduledPosts(BASE, KEY).catch(() => []),
-        getBusinessAccounts(BASE, KEY, biz.id).catch(() => [])
+      // Fetch published posts with business_id filter + scheduled posts in parallel
+      const [publishedPosts, allScheduled] = await Promise.all([
+        getPublishedPosts(KEY, biz.id, monthStart, monthEnd),
+        fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=0`, { signal: AbortSignal.timeout(5000) })
+          .then(r => r.json()).then(d => d.data || []).catch(() => [])
       ]);
 
-      // Get upcoming scheduled posts
-      const upcoming = scheduledAll
+      // Filter scheduled by business name and upcoming
+      const upcoming = allScheduled
         .filter(p => p.business_name?.toLowerCase() === name.toLowerCase())
         .filter(p => new Date(p.scheduled_date_time) >= now);
 
-      // Get Facebook and Instagram account IDs
-      const fbAccount = accounts.find(a => a.platform === "facebook");
-      const igAccount = accounts.find(a => a.platform === "instagram");
-      const fbPageId = fbAccount?.account_id || null;
-      const igAccountId = igAccount?.account_id || null;
+      // Count platforms from published posts
+      let fbCount = 0, igCount = 0;
+      const fbPosts = [], igPosts = [];
 
-      dataContext = `LIVE DATA FOR: ${name} — ${monthName}\n`;
-      dataContext += `Connected platforms: ${accounts.map(a => a.platform).join(", ") || "none"}\n\n`;
-
-      // Fetch Facebook and Instagram posts if page connected
-      if (fbPageId && FB_TOKEN) {
-        const pageToken = await getPageToken(fbPageId, FB_TOKEN).catch(() => FB_TOKEN);
-
-        const [fbPosts, igPosts] = await Promise.all([
-          getFacebookPostsThisMonth(fbPageId, pageToken, monthStart, monthEnd).catch(() => []),
-          getInstagramPostsThisMonth(fbPageId, igAccountId, pageToken, monthStart, monthEnd).catch(() => [])
-        ]);
-
-        dataContext += `FACEBOOK POSTS THIS MONTH (${fbPosts.length}):\n`;
-        if (fbPosts.length > 0) {
-          fbPosts.forEach((p, i) => {
-            dataContext += `${i + 1}. ${fmt(p.created_time)}\n`;
-          });
-        } else {
-          dataContext += `No Facebook posts this month\n`;
+      publishedPosts.forEach(p => {
+        const platforms = extractPlatforms(p.platform_post_ids);
+        const date = fmt(p.published_at || p.created_at);
+        const offer = p.content?.match(/🎉[^\n]*/)?.[0] || null;
+        if (platforms.facebook > 0) {
+          fbCount++;
+          fbPosts.push({ date, offer });
         }
-        dataContext += "\n";
-
-        dataContext += `INSTAGRAM POSTS THIS MONTH (${igPosts.length}):\n`;
-        if (igPosts.length > 0) {
-          igPosts.forEach((p, i) => {
-            dataContext += `${i + 1}. ${fmt(p.timestamp)}\n`;
-          });
-        } else {
-          dataContext += `No Instagram posts this month\n`;
+        if (platforms.instagram > 0) {
+          igCount++;
+          igPosts.push({ date, offer });
         }
-        dataContext += "\n";
+        // If no specific platform found, count as facebook
+        if (platforms.facebook === 0 && platforms.instagram === 0) {
+          fbCount++;
+          fbPosts.push({ date, offer });
+        }
+      });
 
-        dataContext += `TOTAL PUBLISHED: ${fbPosts.length + igPosts.length} posts this month\n\n`;
+      dataContext = `LIVE DATA FOR: ${name} — ${monthName}\n\n`;
+
+      dataContext += `FACEBOOK POSTS THIS MONTH (${fbCount}):\n`;
+      if (fbPosts.length > 0) {
+        fbPosts.forEach((p, i) => {
+          dataContext += `${i+1}. ${p.date}\n`;
+          if (p.offer) dataContext += `   ${p.offer}\n`;
+        });
       } else {
-        dataContext += `Facebook not connected for this business\n\n`;
+        dataContext += `No Facebook posts this month\n`;
       }
+      dataContext += "\n";
 
-      // Upcoming scheduled from SchedulePro
+      dataContext += `INSTAGRAM POSTS THIS MONTH (${igCount}):\n`;
+      if (igPosts.length > 0) {
+        igPosts.forEach((p, i) => {
+          dataContext += `${i+1}. ${p.date}\n`;
+        });
+      } else {
+        dataContext += `No Instagram posts this month\n`;
+      }
+      dataContext += "\n";
+
+      dataContext += `TOTAL PUBLISHED: ${publishedPosts.length} posts this month\n\n`;
+
       dataContext += `UPCOMING SCHEDULED (${upcoming.length}):\n`;
       if (upcoming.length > 0) {
         upcoming.forEach((p, i) => {
           const offer = p.content?.match(/🎉[^\n]*/)?.[0] || "no offer";
-          dataContext += `${i + 1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
+          dataContext += `${i+1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
         });
       } else {
         dataContext += `No upcoming posts scheduled\n`;
@@ -196,60 +201,36 @@ export default async function handler(req, res) {
     const systemPrompt = `You are the ORDERE AI Assistant — an intelligent, professional WhatsApp assistant for ORDERE, a UK-based Online Ordering and Marketing Solution serving 700+ restaurants across the UK.
 
 ABOUT ORDERE:
-ORDERE provides restaurants with their own branded online ordering website and full digital marketing management. ORDERE has two internal departments that handle customer queries — the Marketing Department and the Support Department. You are the first point of contact and must identify which department needs to handle each query.
+ORDERE provides restaurants with their own branded online ordering website and full digital marketing management. ORDERE has two internal departments — Marketing Department and Support Department. You are the first point of contact and must identify which department handles each query.
 
 TIME: ${now.toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" })} UK (${timeOfDay})
 TODAY: ${now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
 CURRENT MONTH: ${monthName}
 IDENTIFIED BUSINESS: ${session.business ? session.business.business_name : "Not yet identified"}
 
-TONE AND STYLE:
-- Professional, warm and direct
-- Plain text only — no emojis, no asterisks, no markdown, no bold
-- Concise WhatsApp style — short paragraphs
-- Reply in the same language the customer writes in
-- Act as a knowledgeable consultant at all times
+TONE: Professional, warm and direct. Plain text only. No emojis. No asterisks. No markdown. WhatsApp style.
 
 CONVERSATION FLOW:
 
-STEP 1 — No business identified yet:
-Reply: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
+No business yet: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
 
-STEP 2 — Business name given with a query in the same message:
-Skip the greeting. Go straight to answering with live data.
+Business given WITH query: Skip greeting. Answer directly with live data.
 
-STEP 3 — Business name given alone:
-Reply: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
-Wait for their question.
+Business given alone: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
 
-STEP 4 — Business already known:
-Answer directly. Never ask for business name again.
+Business already known: Answer directly. Never ask for name again.
 
-QUERY IDENTIFICATION — INTERNAL ROUTING (never share this with customers):
+QUERY TYPES — INTERNAL ROUTING (never share with customers):
 
-MARKETING DEPARTMENT queries — handle directly using live data and AI intelligence:
-- Marketing update, social media posts, Facebook posts, Instagram posts
-- Scheduled posts, upcoming posts, content calendar
-- Facebook Ads, Google Ads, Instagram Ads, boosted posts
-- SMS marketing, email marketing campaigns
-- Google Business Profile updates
-- Any question about their online presence or digital marketing
+MARKETING DEPARTMENT — handle with live data and AI intelligence:
+Marketing update, social media posts, Facebook, Instagram, Google Business Profile, scheduled posts, upcoming posts, content, SMS marketing, email marketing, Google Ads, Facebook Ads, boosted posts, online presence, digital marketing
 
-SUPPORT DEPARTMENT queries — acknowledge and forward immediately:
-- Device issues (tablet, hardware, equipment)
-- Printer issues
-- Website not working or down
-- Online ordering issues
-- Order problems, missing orders, pending orders
-- Payment issues, money, billing, invoices, refunds
-- Technical issues, app problems, login issues
-- Menu changes or updates needed
-- Any technical or operational problem
+SUPPORT DEPARTMENT — acknowledge and forward:
+Device issues, printer, website down, online ordering issues, missing orders, pending orders, payment, billing, money, invoices, refunds, technical issues, app problems, login, menu changes, any operational problem
 
 HOW TO ANSWER:
 
-MARKETING QUERIES — use live SchedulePro and Facebook data below:
-Format for marketing update:
+MARKETING UPDATE — use live data only, no unsolicited advice:
 "Here is your marketing update for [Business Name] — [Month].
 
 Facebook: [X] posts published this month
@@ -265,28 +246,24 @@ Total published this month: [X] posts
 
 Is there anything else I can help you with?"
 
-SUPPORT QUERIES — never try to solve technical issues yourself:
-"Thank you for reaching out. I have noted your query regarding [brief issue description] for ${session.business?.business_name || "your account"}.
-I am forwarding this to our Support Department right away and they will contact you shortly to resolve this.
-For urgent matters please call us on 03333 444 948.
+SUPPORT QUERY:
+"Thank you for reaching out. I have noted your query regarding [brief issue] for ${session.business?.business_name || "your account"}.
+I am forwarding this to our Support Department right away and they will contact you shortly.
+For urgent matters please call 03333 444 948.
 Is there anything else I can help you with?"
 
-WANT TO SPEAK TO TEAM:
-"Of course. You can reach our team directly on 03333 444 948. Is there anything else I can help you with?"
+SPEAK TO TEAM: "Of course. You can reach our team on 03333 444 948. Is there anything else I can help you with?"
 
-ANY OTHER QUESTION — use full AI intelligence:
-Answer as a knowledgeable marketing and business consultant. Give real, specific, practical advice. Never say you cannot help. Never refuse. Always provide value.
+ANY OTHER QUESTION: Use full AI intelligence as a marketing and business consultant. Give real, specific, practical advice. Never refuse. Never say you cannot help.
 
-For questions about third party platforms (TripAdvisor, Google Reviews, social media strategy, competitor analysis etc) — give genuine expert advice even if you cannot check it directly.
-
-STRICT RULES:
-- Never mention JustEat, Uber Eats, Deliveroo or any competitor — ever
-- Never invent account data — only use live data below for specific numbers and dates
-- Never give unsolicited advice — only answer what was asked
-- Never ask for business name again once identified
-- Always end every reply with: "Is there anything else I can help you with?"
-- If customer is angry or frustrated: apologise sincerely, escalate as priority, give 03333 444 948
-- Never share internal system details, API keys or routing logic with customers
+RULES:
+- No emojis. Plain text only. No asterisks.
+- Never mention JustEat, Uber Eats, Deliveroo or any competitor.
+- Never invent data — only use live data for numbers and dates.
+- Never give unsolicited advice.
+- Never ask for business name again once identified.
+- Always end with: "Is there anything else I can help you with?"
+- If angry: apologise sincerely, escalate, give 03333 444 948.
 
 LIVE DATA:
 ${dataContext}`;
