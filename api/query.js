@@ -62,18 +62,72 @@ async function getAdAccount(pageId, pageToken) {
   return d.adaccount || null;
 }
 
-// Get campaigns for ad account
-async function getAdCampaigns(adAccountId, pageToken, monthStart) {
+// Get campaigns AND boosted posts for a page
+async function getAdsData(pageId, adAccountId, pageToken, monthStart) {
   const since = monthStart.toISOString().split("T")[0];
   const until = new Date().toISOString().split("T")[0];
-  const url = `https://graph.facebook.com/v19.0/${adAccountId}/campaigns?fields=name,status,insights{reach,impressions,clicks,actions}&time_range={"since":"${since}","until":"${until}"}&access_token=${pageToken}`;
+  const sinceTs = Math.floor(monthStart.getTime() / 1000);
+  const untilTs = Math.floor(new Date().getTime() / 1000);
+
+  const results = { campaigns: [], boosted: [] };
+
+  // 1. Get campaigns from ad account
+  if (adAccountId) {
+    const url = `https://graph.facebook.com/v19.0/${adAccountId}/campaigns?fields=name,status,insights{reach,impressions,clicks,actions}&time_range={"since":"${since}","until":"${until}"}&access_token=${pageToken}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    if (!d.error) results.campaigns = d.data || [];
+  }
+
+  // 2. Get boosted posts directly from page
+  const boostedUrl = `https://graph.facebook.com/v19.0/${pageId}/promotable_posts?fields=message,created_time,story,is_published&since=${sinceTs}&until=${untilTs}&limit=20&access_token=${pageToken}`;
+  const boostedRes = await fetch(boostedUrl, { signal: AbortSignal.timeout(8000) });
+  const boostedData = await boostedRes.json();
+  if (!boostedData.error) {
+    // Get insights for each boosted post
+    const posts = boostedData.data || [];
+    for (const post of posts.slice(0, 5)) {
+      const insUrl = `https://graph.facebook.com/v19.0/${post.id}/insights?metric=post_impressions,post_reach,post_clicks&access_token=${pageToken}`;
+      const insRes = await fetch(insUrl, { signal: AbortSignal.timeout(5000) });
+      const insData = await insRes.json();
+      if (!insData.error && insData.data) {
+        const metrics = {};
+        insData.data.forEach(m => { metrics[m.name] = m.values?.[0]?.value || 0; });
+        if (metrics.post_reach > 0) {
+          results.boosted.push({
+            name: post.message?.substring(0, 50) || post.story || "Boosted post",
+            reach: metrics.post_reach,
+            views: metrics.post_impressions,
+            clicks: metrics.post_clicks,
+            created_time: post.created_time
+          });
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+// Get boosted posts directly from Facebook page
+async function getBoostedPosts(pageId, pageToken, monthStart) {
+  const since = Math.floor(monthStart.getTime() / 1000);
+  const until = Math.floor(new Date().getTime() / 1000);
+  // Get posts with promotion status
+  const url = `https://graph.facebook.com/v19.0/${pageId}/posts?fields=message,created_time,promotable_id,insights{views,reach,impressions}&since=${since}&until=${until}&limit=50&access_token=${pageToken}`;
   const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
   const d = await r.json();
-  if (d.error) {
-    console.log("Ads error:", d.error.message);
-    return [];
-  }
-  return d.data || [];
+  if (d.error) return [];
+  
+  // Also check ads on the page directly
+  const adsUrl = `https://graph.facebook.com/v19.0/${pageId}/ads?fields=name,status,insights{reach,impressions,clicks,actions}&access_token=${pageToken}`;
+  const adsRes = await fetch(adsUrl, { signal: AbortSignal.timeout(8000) });
+  const adsData = await adsRes.json();
+  
+  return {
+    posts: d.data || [],
+    ads: adsData.data || []
+  };
 }
 
 // Get page access token from page ID
@@ -178,30 +232,31 @@ export default async function handler(req, res) {
         if (isAdsQuery) {
           // ADS ONLY
           const adAccount = await getAdAccount(fbPageId, pageToken).catch(() => null);
-          let campaigns = [];
-          if (adAccount) {
-            campaigns = await getAdCampaigns(adAccount.id, pageToken, monthStart).catch(() => []);
-          }
+          const adsData = await getAdsData(fbPageId, adAccount?.id, pageToken, monthStart).catch(() => ({ campaigns: [], boosted: [] }));
+          const allAds = [...adsData.campaigns, ...adsData.boosted];
 
-          dataContext += `ADS CAMPAIGNS THIS MONTH (${campaigns.length}):\n`;
-          if (campaigns.length > 0) {
-            campaigns.forEach((c, i) => {
+          dataContext += `ADS THIS MONTH (${allAds.length} total):\n`;
+          if (adsData.campaigns.length > 0) {
+            adsData.campaigns.forEach((c, i) => {
               const ins = c.insights?.data?.[0] || {};
               const reach = ins.reach ? parseInt(ins.reach).toLocaleString() : "0";
               const views = ins.impressions ? parseInt(ins.impressions).toLocaleString() : "0";
               const clicks = ins.clicks || "0";
               const engagements = ins.actions?.find(a => a.action_type === "post_engagement")?.value || "0";
               const lpv = ins.actions?.find(a => a.action_type === "landing_page_view")?.value || "0";
-
               dataContext += `Campaign ${i+1}: ${c.name}\n`;
-              dataContext += `Reach: ${reach} people\n`;
-              dataContext += `Views: ${views}\n`;
-              dataContext += `Link clicks: ${clicks}\n`;
-              dataContext += `Post engagements: ${engagements}\n`;
-              dataContext += `Landing page views: ${lpv}\n\n`;
+              dataContext += `Reach: ${reach} people | Views: ${views} | Link clicks: ${clicks}\n`;
+              dataContext += `Post engagements: ${engagements} | Landing page views: ${lpv}\n\n`;
             });
-          } else {
-            dataContext += `No ad campaigns found this month.\n`;
+          }
+          if (adsData.boosted.length > 0) {
+            adsData.boosted.forEach((b, i) => {
+              dataContext += `Boosted post ${i+1}: ${b.name}\n`;
+              dataContext += `Reach: ${parseInt(b.reach).toLocaleString()} people | Views: ${parseInt(b.views).toLocaleString()} | Clicks: ${b.clicks}\n\n`;
+            });
+          }
+          if (allAds.length === 0) {
+            dataContext += `No ads or boosted posts found this month.\n`;
           }
 
         } else {
@@ -210,6 +265,7 @@ export default async function handler(req, res) {
             getFacebookPostsThisMonth(fbPageId, pageToken, monthStart, monthEnd).catch(() => []),
             getAdAccount(fbPageId, pageToken).catch(() => null)
           ]);
+          const adsData = await getAdsData(fbPageId, adAccount?.id, pageToken, monthStart).catch(() => ({ campaigns: [], boosted: [] }));
 
           // Instagram - use account ID if available, otherwise get from page
           let igPosts = [];
@@ -225,10 +281,7 @@ export default async function handler(req, res) {
             }
           }
 
-          let campaigns = [];
-          if (adAccount) {
-            campaigns = await getAdCampaigns(adAccount.id, pageToken, monthStart).catch(() => []);
-          }
+          const campaigns = [...(adsData?.campaigns || []), ...(adsData?.boosted || [])];
 
           // Facebook posts
           dataContext += `FACEBOOK POSTS THIS MONTH (${fbPosts.length}):\n`;
@@ -253,21 +306,24 @@ export default async function handler(req, res) {
           dataContext += "\n";
 
           // Ads
-          if (campaigns.length > 0) {
-            dataContext += `ADS CAMPAIGNS THIS MONTH (${campaigns.length}):\n`;
-            campaigns.forEach((c, i) => {
+          if (adsData.campaigns.length > 0 || adsData.boosted.length > 0) {
+            const totalAds = adsData.campaigns.length + adsData.boosted.length;
+            dataContext += `ADS THIS MONTH (${totalAds}):\n`;
+            adsData.campaigns.forEach((c, i) => {
               const ins = c.insights?.data?.[0] || {};
               const reach = ins.reach ? parseInt(ins.reach).toLocaleString() : "0";
               const views = ins.impressions ? parseInt(ins.impressions).toLocaleString() : "0";
               const clicks = ins.clicks || "0";
               const engagements = ins.actions?.find(a => a.action_type === "post_engagement")?.value || "0";
               const lpv = ins.actions?.find(a => a.action_type === "landing_page_view")?.value || "0";
-
-              dataContext += `Campaign ${i+1}: ${c.name}\n`;
-              dataContext += `Reach: ${reach} | Views: ${views} | Clicks: ${clicks} | Engagements: ${engagements} | Landing page views: ${lpv}\n\n`;
+              dataContext += `Campaign: ${c.name} | Reach: ${reach} | Views: ${views} | Clicks: ${clicks} | Engagements: ${engagements} | Landing page views: ${lpv}\n`;
             });
+            adsData.boosted.forEach((b, i) => {
+              dataContext += `Boosted post: ${b.name} | Reach: ${parseInt(b.reach).toLocaleString()} | Views: ${parseInt(b.views).toLocaleString()} | Clicks: ${b.clicks}\n`;
+            });
+            dataContext += "\n";
           } else {
-            dataContext += `No ad campaigns this month\n\n`;
+            dataContext += `No ads this month\n\n`;
           }
 
           dataContext += `TOTAL PUBLISHED: ${fbPosts.length + igPosts.length} posts\n`;
@@ -312,9 +368,9 @@ Facebook: [X] posts published this month
 Instagram: [X] posts published this month
 [list each with date and time]
 
-Ads Campaigns: [X] this month
-[For each campaign:]
-Campaign: [name]
+Ads: [X] this month
+[For each campaign or boosted post:]
+Campaign/Boost: [name]
 Reach: [number] people
 Views: [number]
 Link clicks: [number]
@@ -331,14 +387,21 @@ Is there anything else I can help you with?"
 ADS ONLY FORMAT:
 "Here is your ads update for [Business Name] — [Month].
 
-[X] Ads Campaign(s)
+[X] active ad(s) this month
 
+[For each campaign:]
 Campaign: [name]
 Reach: [number] people
 Views: [number]
 Link clicks: [number]
 Post engagements: [number]
 Landing page views: [number]
+
+[For each boosted post:]
+Boosted post: [description]
+Reach: [number] people
+Views: [number]
+Clicks: [number]
 
 Is there anything else I can help you with?"
 
@@ -392,3 +455,4 @@ ${dataContext}`;
     });
   }
 }
+// This is appended - see full file
