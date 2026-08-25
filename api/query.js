@@ -1,4 +1,40 @@
 const sessions = new Map();
+let cachedPosts = null;
+let cacheTime = null;
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function getAllPosts(BASE, KEY) {
+  // Return cache if fresh
+  if (cachedPosts && cacheTime && (Date.now() - cacheTime) < CACHE_TTL) {
+    return cachedPosts;
+  }
+
+  // Fetch pages 0, 50, 100, 150 all at once
+  const pages = [0, 50, 100, 150, 200];
+  
+  const [schedPages, pubPages, failPages] = await Promise.all([
+    Promise.all(pages.map(s => 
+      fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=${s}`)
+        .then(r => r.json()).then(d => d.data || []).catch(() => [])
+    )),
+    Promise.all(pages.map(s => 
+      fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=${s}`)
+        .then(r => r.json()).then(d => d.data || []).catch(() => [])
+    )),
+    Promise.all([0].map(s => 
+      fetch(`${BASE}/listfailedposts?apiKey=${KEY}&start=${s}`)
+        .then(r => r.json()).then(d => d.data || []).catch(() => [])
+    ))
+  ]);
+
+  cachedPosts = {
+    scheduled: schedPages.flat(),
+    published: pubPages.flat(),
+    failed: failPages.flat()
+  };
+  cacheTime = Date.now();
+  return cachedPosts;
+}
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -9,9 +45,10 @@ export default async function handler(req, res) {
   if (req.method === "GET") {
     return res.status(200).json({
       status: "ORDERE AI Agent Live",
-      version: "8.0",
+      version: "10.0",
       anthropic_key: process.env.ANTHROPIC_API_KEY ? "SET" : "MISSING",
-      schedulepro_key: process.env.SCHEDULEPRO_API_KEY ? "SET" : "MISSING"
+      schedulepro_key: process.env.SCHEDULEPRO_API_KEY ? "SET" : "MISSING",
+      cache: cachedPosts ? `${cachedPosts.scheduled.length} scheduled, ${cachedPosts.published.length} published` : "empty"
     });
   }
 
@@ -33,7 +70,7 @@ export default async function handler(req, res) {
     const hour = parseInt(now.toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit" }));
     const timeOfDay = hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
 
-    // Find business if not in session
+    // Find business
     if (!session.business) {
       const bizRes = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`);
       const bizData = await bizRes.json();
@@ -51,7 +88,7 @@ export default async function handler(req, res) {
       if (matchedBiz && bestScore > 0) session.business = matchedBiz;
     }
 
-    // Fetch data — 2 pages max per endpoint (100 posts) all in parallel
+    // Fetch ALL posts + business accounts in parallel
     let dataContext = "Business not yet identified.";
     if (session.business) {
       const biz = session.business;
@@ -62,21 +99,16 @@ export default async function handler(req, res) {
         hour: "2-digit", minute: "2-digit"
       });
 
-      // Fetch pages 0 and 50 simultaneously for all endpoints
-      const [s0, s50, p0, p50, f0, acc] = await Promise.all([
-        fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=0`).then(r => r.json()).catch(() => ({ data: [] })),
-        fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=50`).then(r => r.json()).catch(() => ({ data: [] })),
-        fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=0`).then(r => r.json()).catch(() => ({ data: [] })),
-        fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=50`).then(r => r.json()).catch(() => ({ data: [] })),
-        fetch(`${BASE}/listfailedposts?apiKey=${KEY}&start=0`).then(r => r.json()).catch(() => ({ data: [] })),
+      const [allPosts, accRes] = await Promise.all([
+        getAllPosts(BASE, KEY),
         fetch(`${BASE}/listaccounts?apiKey=${KEY}&business_id=${biz.id}`).then(r => r.json()).catch(() => ({ data: [] }))
       ]);
 
       const match = arr => arr.filter(p => p.business_name?.toLowerCase() === name.toLowerCase());
-      const scheduled = match([...(s0.data||[]), ...(s50.data||[])]);
-      const published = match([...(p0.data||[]), ...(p50.data||[])]);
-      const failed = match(f0.data||[]);
-      const accounts = acc.data || [];
+      const scheduled = match(allPosts.scheduled);
+      const published = match(allPosts.published);
+      const failed = match(allPosts.failed);
+      const accounts = accRes.data || [];
       const upcoming = scheduled.filter(p => new Date(p.scheduled_date_time) >= now);
 
       dataContext = `LIVE DATA FOR: ${name}\n`;
@@ -87,7 +119,7 @@ export default async function handler(req, res) {
 
       if (upcoming.length > 0) {
         dataContext += `UPCOMING POSTS:\n`;
-        upcoming.slice(0, 5).forEach((p, i) => {
+        upcoming.slice(0, 10).forEach((p, i) => {
           const offer = p.content?.match(/🎉[^\n]*/)?.[0] || "no offer";
           dataContext += `${i+1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
         });
@@ -95,8 +127,8 @@ export default async function handler(req, res) {
       }
 
       if (published.length > 0) {
-        dataContext += `RECENT PUBLISHED:\n`;
-        published.slice(0, 5).forEach((p, i) => {
+        dataContext += `PUBLISHED POSTS:\n`;
+        published.slice(0, 10).forEach((p, i) => {
           const offer = p.content?.match(/🎉[^\n]*/)?.[0] || "no offer";
           dataContext += `${i+1}. ${fmt(p.published_at || p.created_at)} — ${offer}\n`;
         });
@@ -111,60 +143,73 @@ export default async function handler(req, res) {
       }
     }
 
-    const systemPrompt = `You are the ORDERE AI Assistant — a professional marketing consultant and business advisor for ORDERE, a UK Online Ordering and Marketing Solution for 700+ restaurants.
+    const hasQuery = /update|marketing|post|schedule|publish|how many|status|report|platform/i.test(message);
+    const isFirstMessage = session.history.length === 0;
+
+    const systemPrompt = `You are the ORDERE AI Assistant — a professional WhatsApp assistant and marketing consultant for ORDERE, a UK Online Ordering and Marketing Solution for 700+ restaurants.
 
 TIME: ${now.toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" })} UK (${timeOfDay})
 DATE: ${now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
 IDENTIFIED BUSINESS: ${session.business ? session.business.business_name : "Not yet identified"}
 
 TONE:
-- Professional, warm and direct. No emojis ever. No exclamation marks.
-- Plain text only — no asterisks, no markdown, no special formatting.
-- Short clear paragraphs. WhatsApp style.
-- Like a trusted senior marketing advisor.
+- Professional and direct. No emojis. No exclamation marks.
+- Plain text only. No asterisks. No markdown.
+- Concise. WhatsApp style.
 - Reply in same language as customer.
 
-CONVERSATION FLOW:
+CONVERSATION RULES:
 
-No business yet — customer sends any message:
+RULE 1 — No business identified yet:
 Reply: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
 
-Business just identified this message:
-Reply: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
+RULE 2 — Business name given WITH a query in same message (e.g. "Voujon Indian marketing update"):
+Do NOT say "I found your account." Go straight to answering the query with live data.
+
+RULE 3 — Business name given alone (just name and postcode, no query):
+Reply only: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
 Stop. Wait for their question.
 
-Business already known:
-Answer directly. Never ask for business name again.
+RULE 4 — Business already known, customer asks something:
+Answer directly. Never mention "found your account" again.
 
 HOW TO ANSWER:
 
-ACCOUNT DATA (posts, schedule, offers, platforms):
-Use live data below. Give exact numbers and dates.
+MARKETING UPDATE / POST STATUS:
+Use ONLY the live data. No opinions. No unsolicited advice.
+Reply in this exact format:
+"Here is your current marketing status for [Business Name].
 
-MARKETING ADVICE (boost, more orders, social media, ads, growth):
-Answer as expert marketing consultant. Give specific actionable advice for UK restaurants.
-Reference ORDERE services naturally: social media posts, Google Business Profile, Facebook ads, Instagram ads, SMS campaigns, email marketing, branded ordering website.
+Published posts: [X] total
+Upcoming scheduled: [X] posts
+[List each upcoming post with date, time and offer]
+[If failed posts: Failed posts: X]
 
-THIRD PARTY PLATFORMS (TripAdvisor, Google Reviews, Yelp, any external platform):
-Do not say you cannot check it. Give real consultant advice on why it matters and what to do.
+Is there anything else I can help you with?"
 
-SUPPORT ISSUES (device, printer, website, orders, payment, billing, technical, login, menu):
+MARKETING ADVICE (only when explicitly asked):
+Give specific actionable advice for UK restaurants.
+Reference ORDERE services naturally where relevant.
+Do NOT give advice when customer only asked for data.
+
+SUPPORT ISSUES (device, printer, website, orders, payment, billing, technical):
 Reply: "Understood. I have noted your query regarding [issue] for ${session.business?.business_name || "your account"}. I am forwarding this to our Support Team now and they will contact you shortly. For urgent matters please call 03333 444 948. Is there anything else I can help you with?"
 
 SPEAK TO TEAM:
-Reply: "Of course. You can reach our team directly on 03333 444 948. Is there anything else I can help you with?"
+"Of course. You can reach our team directly on 03333 444 948. Is there anything else I can help you with?"
 
 ANY OTHER QUESTION:
-Use full intelligence. Give real value. Never refuse. Never say I cannot help with that.
+Use full intelligence. Give real value. Never refuse.
 
-RULES:
+STRICT RULES:
 - No emojis ever
-- Plain text only — no asterisks or markdown
-- Never mention JustEat, Uber Eats, Deliveroo or any competitor
+- Plain text only — no asterisks, no markdown
+- Never mention JustEat, Uber Eats, Deliveroo
 - Never invent account data — only use live data for numbers and dates
+- Never give unsolicited advice
 - Never ask for business name again once identified
 - Always end with: "Is there anything else I can help you with?"
-- If customer angry: apologise sincerely, escalate, give 03333 444 948
+- If angry: apologise, escalate, give 03333 444 948
 
 LIVE DATA:
 ${dataContext}`;
