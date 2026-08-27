@@ -13,38 +13,35 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         filter: { GROUP_ID: G },
-        select: ["ID", "TITLE", "STATUS", "CREATED_DATE", "DEADLINE"],
-        order: { CREATED_DATE: "desc" }
+        order: { createdDate: "desc" }
       }),
       signal: AbortSignal.timeout(8000)
     });
     const d = await r.json();
     console.log("Bitrix error:", d.error || "none");
-    console.log("Bitrix ALL tasks:", d.result?.tasks?.length || 0);
-    const allTasks = d.result?.tasks || [];
-    allTasks.forEach((t,i) => {
-      console.log(`Task ${i+1}: ID=${t.ID} TITLE=${t.TITLE} STATUS=${t.STATUS} CREATED=${t.CREATED_DATE}`);
-    });
-    
-    // No date filter — get all tasks and filter by month in code
     const all = (d.result?.tasks || []);
+    console.log("Bitrix total:", all.length);
+    console.log("Bitrix raw first item:", JSON.stringify(all[0] || "empty").substring(0, 400));
+
+    // NOTE: tasks.task.list returns lowerCamelCase fields (id, title, status,
+    // createdDate, deadline) — NOT the UPPER_CASE fields used by CRM methods.
     const biz = bizName.toLowerCase().replace(/['\-]/g,"");
     const bizWords = biz.split(" ").filter(w => w.length > 2);
     const matched = all.filter(t => {
-      const title = (t.TITLE||"").toLowerCase().replace(/['\-]/g,"");
+      const title = (t.title||"").toLowerCase().replace(/['\-]/g,"");
       return bizWords.filter(w => title.includes(w)).length >= Math.min(2, bizWords.length);
     });
     const sm = {"1":"New","2":"In Progress","3":"Completed","4":"Pending","5":"Completed","6":"Deferred"};
     const f = t => ({
-      title: t.TITLE,
-      status: sm[t.STATUS]||t.STATUS,
-      date: new Date(t.CREATED_DATE).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}),
-      deadline: t.DEADLINE?new Date(t.DEADLINE).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}):null
+      title: t.title,
+      status: sm[t.status]||t.status,
+      date: t.createdDate?new Date(t.createdDate).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}):null,
+      deadline: t.deadline?new Date(t.deadline).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}):null
     });
     return {
-      ads: matched.filter(t=>/social media ads|facebook ads|instagram ads|boost/i.test(t.TITLE)).map(f),
-      sms: matched.filter(t=>/sms|text marketing/i.test(t.TITLE)).map(f),
-      google: matched.filter(t=>/google ads|google ad|gmb/i.test(t.TITLE)).map(f)
+      ads: matched.filter(t=>/social media ads|facebook ads|instagram ads|boost/i.test(t.title||"")).map(f),
+      sms: matched.filter(t=>/sms|text marketing/i.test(t.title||"")).map(f),
+      google: matched.filter(t=>/google ads|google ad|gmb/i.test(t.title||"")).map(f)
     };
   } catch(e) { 
     console.error("Bitrix error:", e.message);
