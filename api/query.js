@@ -9,6 +9,7 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
     // Bitrix24 REST API - paginate, since tasks.task.list caps at 50 per call
     const url = `${W}tasks.task.list.json`;
     let all = [];
+    const seenIds = new Set();
     let start = 0;
     for (let page = 0; page < 10; page++) { // hard cap at 500 tasks, safety net
       const r = await fetch(url, {
@@ -26,13 +27,19 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
         console.log("Bitrix error_description:", d.error_description || "none");
       }
       const batch = Array.isArray(d.result) ? d.result : (d.result?.tasks || []);
-      all = all.concat(batch);
-      // Bitrix24 returns "next" when there are more pages
+      console.log(`Bitrix page ${page}: start=${start} batch=${batch.length} next=${d.next} first_id=${batch[0]?.id} last_id=${batch[batch.length-1]?.id}`);
+
+      // stop if this page brought nothing new (protects against a stuck "next")
+      const newOnes = batch.filter(t => !seenIds.has(t.id));
+      if (newOnes.length === 0) break;
+      newOnes.forEach(t => seenIds.add(t.id));
+      all = all.concat(newOnes);
+
       if (d.next === undefined || d.next === null || batch.length === 0) break;
       start = d.next;
     }
-    console.log("Bitrix total fetched:", all.length);
-    console.log("Bitrix raw first item:", JSON.stringify(all[0] || "empty").substring(0, 400));
+    console.log("Bitrix total fetched (unique):", all.length);
+    console.log("Bitrix all titles:", all.map(t=>t.title).join(" | ").substring(0, 1500));
 
     // NOTE: tasks.task.list returns lowerCamelCase fields (id, title, status,
     // createdDate, deadline) — NOT the UPPER_CASE fields used by CRM methods.
