@@ -83,26 +83,27 @@ export default async function handler(req, res) {
   const fmt = d => new Date(d).toLocaleDateString("en-GB", { weekday:"short", day:"numeric", month:"short" }) + " at " + new Date(d).toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" });
 
   // Detect which month the customer is asking about
+  // Use word boundary matching to avoid "march" matching in "marketing"
   const msgLowerMonth = message.toLowerCase();
   const monthMap = {
     january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
     july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
-    jan: 0, feb: 1, mar: 2, apr: 3, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+    jan: 0, feb: 1, apr: 3, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
   };
   let targetYear = now.getFullYear();
   let targetMonth = now.getMonth();
 
   // Check for "last month"
-  if (msgLowerMonth.includes("last month")) {
+  if (/\blast month\b/.test(msgLowerMonth)) {
     targetMonth = now.getMonth() - 1;
     if (targetMonth < 0) { targetMonth = 11; targetYear--; }
   }
-  // Check for specific month name
+  // Check for specific month name using word boundaries
   else {
-    for (const [monthName, monthNum] of Object.entries(monthMap)) {
-      if (msgLowerMonth.includes(monthName)) {
-        targetMonth = monthNum;
-        // If requested month is in future, use last year
+    for (const [mName, mNum] of Object.entries(monthMap)) {
+      const regex = new RegExp(`\\b${mName}\\b`);
+      if (regex.test(msgLowerMonth)) {
+        targetMonth = mNum;
         if (targetMonth > now.getMonth()) targetYear--;
         break;
       }
