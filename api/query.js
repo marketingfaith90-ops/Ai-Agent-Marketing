@@ -1,6 +1,60 @@
 const sessions = new Map();
 const BASE = "https://scheduler.ordereautomation.xyz/api";
 
+// Bitrix24 - get marketing tasks for a business
+async function getBitrixTasks(businessName, monthStart, monthEnd) {
+  const WEBHOOK = process.env.BITRIX24_WEBHOOK;
+  const GROUP_ID = process.env.BITRIX24_MARKETING_GROUP_ID;
+  if (!WEBHOOK || !GROUP_ID) return { ads: [], sms: [], googleAds: [], other: [] };
+
+  try {
+    const since = monthStart.toISOString().split("T")[0];
+    const until = monthEnd.toISOString().split("T")[0];
+
+    // Search tasks in marketing department group
+    const url = `${WEBHOOK}tasks.task.list?filter[GROUP_ID]=${GROUP_ID}&filter[>=CREATED_DATE]=${since}&filter[<=CREATED_DATE]=${until}&select[]=ID&select[]=TITLE&select[]=STATUS&select[]=CREATED_DATE&select[]=DEADLINE&select[]=DESCRIPTION`;
+    
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    const tasks = d.result?.tasks || [];
+
+    // Filter tasks that mention this business
+    const bizLower = businessName.toLowerCase();
+    const bizTasks = tasks.filter(t => 
+      t.TITLE?.toLowerCase().includes(bizLower) ||
+      t.DESCRIPTION?.toLowerCase().includes(bizLower)
+    );
+
+    // Categorise by type
+    const ads = [], sms = [], googleAds = [], other = [];
+    
+    bizTasks.forEach(t => {
+      const title = t.TITLE?.toLowerCase() || "";
+      const statusMap = { "2": "In Progress", "3": "Completed", "4": "Pending", "5": "Completed", "6": "Deferred" };
+      const status = statusMap[t.STATUS] || "Unknown";
+      const date = t.CREATED_DATE ? new Date(t.CREATED_DATE).toLocaleDateString("en-GB", { day:"numeric", month:"short", year:"numeric" }) : "Unknown date";
+      const deadline = t.DEADLINE ? new Date(t.DEADLINE).toLocaleDateString("en-GB", { day:"numeric", month:"short", year:"numeric" }) : null;
+      
+      const task = { title: t.TITLE, status, date, deadline };
+
+      if (title.includes("social media ads") || title.includes("facebook ads") || title.includes("instagram ads") || title.includes("social media ad")) {
+        ads.push(task);
+      } else if (title.includes("sms") || title.includes("sms marketing") || title.includes("text marketing")) {
+        sms.push(task);
+      } else if (title.includes("google ads") || title.includes("google ad") || title.includes("gmb")) {
+        googleAds.push(task);
+      } else {
+        other.push(task);
+      }
+    });
+
+    return { ads, sms, googleAds, other };
+  } catch(e) {
+    console.error("Bitrix error:", e.message);
+    return { ads: [], sms: [], googleAds: [], other: [] };
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -171,6 +225,9 @@ export default async function handler(req, res) {
         new Date(p.scheduled_date_time) >= now
       );
 
+      // Bitrix24 - get marketing tasks
+      const bitrixTasks = await getBitrixTasks(name, monthStart, monthEnd).catch(() => ({ ads: [], sms: [], googleAds: [], other: [] }));
+
       // Split by platform
       const fbPosts = [], igPosts = [], gmbPosts = [];
       published.forEach(p => {
@@ -205,7 +262,43 @@ export default async function handler(req, res) {
         dataContext += `${i+1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
       }) : (dataContext += "None\n");
 
-      dataContext += `\nNOTE: Fetched pages 0-350 (400 posts). Business matched by name AND Facebook page ID ${fbPageId||"unknown"}.`;
+      // Add Bitrix24 data
+      dataContext += `\nADS CAMPAIGNS THIS MONTH (${bitrixTasks.ads.length}):\n`;
+      if (bitrixTasks.ads.length > 0) {
+        bitrixTasks.ads.forEach((t,i) => {
+          dataContext += `${i+1}. ${t.title}\n`;
+          dataContext += `   Status: ${t.status} | Started: ${t.date}${t.deadline ? ' | Deadline: '+t.deadline : ''}\n`;
+        });
+      } else {
+        dataContext += `No ads campaigns this month\n`;
+      }
+
+      dataContext += `\nSMS MARKETING THIS MONTH (${bitrixTasks.sms.length}):\n`;
+      if (bitrixTasks.sms.length > 0) {
+        bitrixTasks.sms.forEach((t,i) => {
+          dataContext += `${i+1}. ${t.title}\n`;
+          dataContext += `   Status: ${t.status} | Date: ${t.date}\n`;
+        });
+      } else {
+        dataContext += `No SMS campaigns this month\n`;
+      }
+
+      dataContext += `\nGOOGLE ADS THIS MONTH (${bitrixTasks.googleAds.length}):\n`;
+      if (bitrixTasks.googleAds.length > 0) {
+        bitrixTasks.googleAds.forEach((t,i) => {
+          dataContext += `${i+1}. ${t.title}\n`;
+          dataContext += `   Status: ${t.status} | Date: ${t.date}\n`;
+        });
+      } else {
+        dataContext += `No Google Ads this month\n`;
+      }
+
+      if (bitrixTasks.other.length > 0) {
+        dataContext += `\nOTHER MARKETING TASKS (${bitrixTasks.other.length}):\n`;
+        bitrixTasks.other.forEach((t,i) => {
+          dataContext += `${i+1}. ${t.title} — ${t.status}\n`;
+        });
+      }
     }
 
     const systemPrompt = `You are the ORDERE AI Assistant — professional WhatsApp assistant for ORDERE, a UK Online Ordering and Marketing Solution for 700+ restaurants. ORDERE has Marketing and Support departments.
@@ -256,6 +349,15 @@ Upcoming scheduled: [X] posts
 
 Total published this month: [X] posts
 
+Ads Campaigns: [X] this month
+[For each: name, status, started date]
+
+SMS Marketing: [X] this month
+[For each: name, status, date]
+
+Google Ads: [X] this month
+[For each: name, status, date]
+
 Is there anything else I can help you with?"
 
 SUPPORT QUERY: "Thank you for reaching out. I have noted your query regarding [issue] for ${session.business?.business_name || "your account"}. I am forwarding this to our Support Department right away and they will contact you shortly. For urgent matters please call 03333 444 948. Is there anything else I can help you with?"
@@ -302,6 +404,37 @@ Is there anything else I can help you with?"
 
 ANY OTHER QUESTION: Full AI intelligence. Give real value. Never refuse.
 
+FRUSTRATED CUSTOMER DETECTION:
+If customer message contains any of these signals — treat as frustrated and respond with empathy first:
+- Words: cancel, disgusting, terrible, awful, useless, ridiculous, waste, leaving, worst, unacceptable, fed up, done with, sick of, nobody helping, no response, ignored, disappointed, furious, angry, upset, shocking
+- ALL CAPS writing
+- Multiple exclamation marks
+- Threatening to leave or cancel
+- Mentioning they are losing money
+
+FRUSTRATED CUSTOMER RESPONSE FORMAT:
+"I am truly sorry to hear this and I completely understand your frustration.
+
+[Acknowledge their specific issue in one sentence]
+
+I am escalating this to our team right now as an urgent priority. You will receive a call or message within [1 hour for support issues / same day for marketing issues].
+
+Please call us directly on 03333 444 948 if you need immediate assistance — ask for [Support Team for technical issues / Marketing Team for marketing issues] and mention your business name.
+
+I sincerely apologise for the experience you have had. We value your business greatly and will make this right.
+
+Is there anything else I can help you with?"
+
+CANCELLATION THREAT:
+If customer mentions cancelling, leaving, or going elsewhere:
+"I am sorry to hear you are considering leaving and I completely understand your frustration. Before you make a decision, I want to make sure your concerns are addressed properly.
+
+I am escalating this to our senior team right now as a priority. Someone will be in touch with you very shortly to discuss this personally and find the best solution for your business.
+
+Please call 03333 444 948 directly and ask for a manager — they will give your case immediate attention.
+
+Is there anything else I can help you with?"
+
 RULES:
 - Plain text only. No emojis. No asterisks.
 - Never mention JustEat, Uber Eats, Deliveroo.
@@ -309,7 +442,9 @@ RULES:
 - Never give unsolicited advice.
 - Never ask for business name again once identified.
 - Always end: "Is there anything else I can help you with?"
-- If angry: apologise, escalate, give 03333 444 948.
+- Always detect frustration and respond with empathy before anything else.
+- Never be defensive or make excuses when customer is upset.
+- Never dismiss or minimise a customer complaint.
 
 LIVE DATA:
 ${dataContext}`;
