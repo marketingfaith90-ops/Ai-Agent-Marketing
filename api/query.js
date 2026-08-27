@@ -72,6 +72,25 @@ export default async function handler(req, res) {
       const score = nameWords.filter(w => msgLower.split(/\s+/).some(m => m.includes(w) || w.includes(m))).length;
       if (score > bestScore) { bestScore = score; matchedBiz = biz; }
     }
+    // Find ALL businesses that match (not just best one)
+    const allMatches = [];
+    for (const biz of businesses) {
+      const name = biz.business_name.toLowerCase();
+      if (msgLower.includes(name)) { 
+        allMatches.push({ biz, score: 99 });
+      } else {
+        const nameWords = name.split(/\s+/).filter(w => w.length > 2);
+        const score = nameWords.filter(w => msgLower.split(/\s+/).some(m => m.includes(w) || w.includes(m))).length;
+        if (score > 0) allMatches.push({ biz, score });
+      }
+    }
+    
+    // Check if customer has multiple businesses in the system
+    // (same phone/contact might manage multiple)
+    const hasBusinessInMessage = allMatches.length > 0;
+    const isAccountQuery = /order|post|update|marketing|schedule|publish|campaign|report|website|ads|sms|email/i.test(message);
+    const needsConfirmation = isAccountQuery && !hasBusinessInMessage && session.business;
+
     if (matchedBiz && bestScore > 0) {
       if (!session.business || session.business.id !== matchedBiz.id) {
         session.business = matchedBiz;
@@ -84,6 +103,11 @@ export default async function handler(req, res) {
     if (session.business) {
       const biz = session.business;
       const name = biz.business_name;
+      
+      // Add confirmation note if needed
+      if (needsConfirmation) {
+        dataContext = `USING SESSION BUSINESS: ${name}\nIMPORTANT: Customer did not mention business name in this message. If query is account-specific, confirm you are referring to ${name} before giving data.\n\n`;
+      }
 
       // Step 2: Get this business's social account IDs
       const accRes = await fetch(`${BASE}/listaccounts?apiKey=${KEY}&business_id=${biz.id}`, { signal: AbortSignal.timeout(5000) });
@@ -193,11 +217,27 @@ IDENTIFIED BUSINESS: ${session.business ? session.business.business_name : "Not 
 
 TONE: Professional. Direct. Plain text only. No emojis. No asterisks. WhatsApp style.
 
-CONVERSATION:
-No business yet: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
-Business with query: Skip greeting. Answer directly.
-Business alone: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
-Business already known: Answer directly. Never ask for name again.
+CONVERSATION RULES — FOLLOW EXACTLY:
+
+RULE 1 — No business identified yet:
+Reply: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
+
+RULE 2 — Business name given WITH a query:
+Skip greeting. Answer directly with live data.
+
+RULE 3 — Business name given alone:
+Reply: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
+
+RULE 4 — Business already known, same business mentioned again:
+Answer directly. Never ask for name again.
+
+RULE 5 — Customer asks account-specific question WITHOUT mentioning business name:
+NEVER use session business automatically.
+ALWAYS ask: "Could you please confirm which business you are referring to and your postcode? This will help me pull the correct information for you."
+This is critical — a customer may manage multiple businesses. Never assume which one they mean.
+
+RULE 6 — Out of scope question (football, weather, jokes, general chat):
+Answer using full intelligence but keep it brief. Then offer to help with ORDERE queries.
 
 MARKETING UPDATE FORMAT:
 "Here is your marketing update for [Business Name] — [Month].
