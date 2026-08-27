@@ -6,7 +6,7 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
   const G = process.env.BITRIX24_MARKETING_GROUP_ID;
   if (!W || !G) return { ads:[], sms:[], google:[] };
   try {
-    // Bitrix24 REST API - standard format
+    // Bitrix24 REST API - get ALL tasks in group, no date filter
     const url = `${W}tasks.task.list.json`;
     const body = new URLSearchParams();
     body.append("filter[GROUP_ID]", G);
@@ -16,6 +16,7 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
     body.append("select[]", "CREATED_DATE");
     body.append("select[]", "DEADLINE");
     body.append("order[CREATED_DATE]", "desc");
+    body.append("limit", "50");
     
     const r = await fetch(url, {
       method: "POST",
@@ -25,12 +26,12 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
     });
     const d = await r.json();
     console.log("Bitrix error:", d.error || "none");
-    console.log("Bitrix tasks:", d.result?.tasks?.length || 0);
+    console.log("Bitrix ALL tasks:", d.result?.tasks?.length || 0);
     console.log("Bitrix first task:", d.result?.tasks?.[0]?.TITLE || "none");
-    const all = (d.result?.tasks || []).filter(t => {
-      const dt = new Date(t.CREATED_DATE);
-      return dt >= monthStart && dt <= monthEnd;
-    });
+    console.log("Bitrix second task:", d.result?.tasks?.[1]?.TITLE || "none");
+    
+    // No date filter — get all tasks and filter by month in code
+    const all = (d.result?.tasks || []);
     const biz = bizName.toLowerCase().replace(/['\-]/g,"");
     const bizWords = biz.split(" ").filter(w => w.length > 2);
     const matched = all.filter(t => {
