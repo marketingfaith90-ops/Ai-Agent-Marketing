@@ -14,7 +14,7 @@ function extractTitleDate(title) {
   return null;
 }
 
-async function getBitrixTasks(bizName, monthStart, monthEnd) {
+async function getBitrixTasks(bizName, monthStart, monthEnd, postcode) {
   const W = process.env.BITRIX24_WEBHOOK;
   const G = process.env.BITRIX24_MARKETING_GROUP_ID;
   if (!W || !G) return { ads:[], sms:[], google:[] };
@@ -53,9 +53,9 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
         console.log("Bitrix total on server:", d.total);
       }
       const batch = Array.isArray(d.result) ? d.result : (d.result?.tasks || []);
-      const newOnes = batch.filter(t => !seenIds.has(t.id||t.ID));
+      const newOnes = batch.filter(t => !seenIds.has(t.id));
       if (newOnes.length === 0) break;
-      newOnes.forEach(t => seenIds.add(t.ID||t.id));
+      newOnes.forEach(t => seenIds.add(t.id));
       all = all.concat(newOnes);
       console.log(`Bitrix page ${page}: fetched=${newOnes.length} total_so_far=${all.length}`);
       if (d.next === undefined || d.next === null || batch.length === 0) break;
@@ -68,40 +68,40 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
     const biz = bizName.toLowerCase().replace(/['\-]/g,"");
     const bizWords = biz.split(" ").filter(w => w.length > 2);
     const matched = all.filter(t => {
-      const title = (t.TITLE||"").toLowerCase().replace(/['\-]/g,"");
+      const title = (t.title||"").toLowerCase().replace(/['\-]/g,"");
       return bizWords.filter(w => title.includes(w)).length >= Math.min(2, bizWords.length);
     });
     console.log("Bitrix matched for", bizName, ":", matched.length);
-    console.log("Bitrix matched titles:", matched.map(t => t.TITLE).join(" | "));
+    console.log("Bitrix matched titles:", matched.map(t => t.title).join(" | "));
 
     // Filter to the requested month — use title date first, fallback to createdDate
     const inMonth = matched.filter(t => {
-      const titleDate = extractTitleDate(t.TITLE);
-      const dt = titleDate || (t.CREATED_DATE ? new Date(t.CREATED_DATE) : null);
+      const titleDate = extractTitleDate(t.title);
+      const dt = titleDate || (t.createdDate ? new Date(t.createdDate) : null);
       if (!dt) return false;
-      console.log(`  "${t.TITLE}" → ${titleDate ? "title-date" : "createdDate"}: ${dt.toISOString().slice(0,10)}`);
+      console.log(`  "${t.title}" → ${titleDate ? "title-date" : "createdDate"}: ${dt.toISOString().slice(0,10)}`);
       return dt >= monthStart && dt <= monthEnd;
     });
-    console.log("Bitrix in month:", inMonth.length, inMonth.map(t => t.TITLE));
+    console.log("Bitrix in month:", inMonth.length, inMonth.map(t => t.title));
 
     const sm = {"1":"New","2":"In Progress","3":"Completed","4":"Pending","5":"Completed","6":"Deferred"};
     const f = t => {
-      const titleDate = extractTitleDate(t.TITLE);
+      const titleDate = extractTitleDate(t.title);
       const displayDate = titleDate
         ? titleDate.toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})
-        : (t.CREATED_DATE ? new Date(t.CREATED_DATE).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : null);
+        : (t.createdDate ? new Date(t.createdDate).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : null);
       return {
-        title: t.TITLE,
-        status: sm[t.STATUS] || t.STATUS,
+        title: t.title,
+        status: sm[t.status] || t.status,
         date: displayDate,
-        deadline: t.DEADLINE ? new Date(t.DEADLINE).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : null
+        deadline: t.deadline ? new Date(t.deadline).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : null
       };
     };
 
     return {
-      ads:    inMonth.filter(t => /social media ads|facebook ads|instagram ads|boost/i.test(t.TITLE||"")).map(f),
-      sms:    inMonth.filter(t => /sms|text marketing/i.test(t.TITLE||"")).map(f),
-      google: inMonth.filter(t => /google ads|google ad|gmb/i.test(t.TITLE||"")).map(f)
+      ads:    inMonth.filter(t => /social media ads|facebook ads|instagram ads|boost/i.test(t.title||"")).map(f),
+      sms:    inMonth.filter(t => /sms|text marketing/i.test(t.title||"")).map(f),
+      google: inMonth.filter(t => /google ads|google ad|gmb/i.test(t.title||"")).map(f)
     };
   } catch(e) {
     console.error("Bitrix error:", e.message);
@@ -134,7 +134,7 @@ export default async function handler(req, res) {
   if (!message) return res.status(400).json({error:"No message"});
 
   const sid=sessionId||"default";
-  if (!sessions.has(sid)) sessions.set(sid,{history:[],business:null});
+  if (!sessions.has(sid)) sessions.set(sid,{history:[],business:null,postcode:null});
   const session=sessions.get(sid);
 
   const now=new Date();
@@ -168,6 +168,12 @@ export default async function handler(req, res) {
     }
     if(best<1)matched=null;
     if(matched&&best>0&&(!session.business||session.business.id!==matched.id)){session.business=matched;session.history=[];}
+    // Extract postcode from message (UK format: letters+numbers e.g. PO4 0JP)
+    const postcodeMatch = message.match(/([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})/i);
+    if (postcodeMatch) {
+      session.postcode = postcodeMatch[1].toUpperCase().replace(/\s/g,"");
+      console.log("Postcode detected:", session.postcode);
+    }
 
     let dataContext="Business not yet identified.";
 
@@ -186,7 +192,7 @@ export default async function handler(req, res) {
         fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=350`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
         fetch(`${SP}/listscheduledposts?apiKey=${KEY}&start=0`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
         fetch(`${SP}/listaccounts?apiKey=${KEY}&business_id=${biz.id}`,{signal:AbortSignal.timeout(5000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        getBitrixTasks(name,monthStart,monthEnd)
+        getBitrixTasks(name,monthStart,monthEnd,session.postcode)
       ]);
 
       const allPub=[...(p0.data||[]),...(p1.data||[]),...(p2.data||[]),...(p3.data||[]),...(p4.data||[]),...(p5.data||[]),...(p6.data||[]),...(p7.data||[])];
