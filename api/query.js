@@ -6,22 +6,16 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
   const G = process.env.BITRIX24_MARKETING_GROUP_ID;
   if (!W || !G) return { ads:[], sms:[], google:[] };
   try {
-    // Bitrix24 REST API - get ALL tasks in group, no date filter
+    // Bitrix24 REST API - use JSON body with proper field names
     const url = `${W}tasks.task.list.json`;
-    const body = new URLSearchParams();
-    body.append("filter[GROUP_ID]", G);
-    body.append("select[]", "ID");
-    body.append("select[]", "TITLE");
-    body.append("select[]", "STATUS");
-    body.append("select[]", "CREATED_DATE");
-    body.append("select[]", "DEADLINE");
-    body.append("order[CREATED_DATE]", "desc");
-    body.append("limit", "50");
-    
     const r = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filter: { GROUP_ID: G },
+        select: ["ID", "TITLE", "STATUS", "CREATED_DATE", "DEADLINE"],
+        order: { CREATED_DATE: "desc" }
+      }),
       signal: AbortSignal.timeout(8000)
     });
     const d = await r.json();
