@@ -86,11 +86,21 @@ export default async function handler(req, res) {
     let matched=null,best=0;
     for(const b of businesses){
       const n=b.business_name.toLowerCase();
+      // Exact include match
       if(msgLower.includes(n)){matched=b;best=99;break;}
-      const words=n.split(/\s+/).filter(w=>w.length>2);
-      const score=words.filter(w=>msgLower.split(/\s+/).some(m=>m.includes(w)||w.includes(m))).length;
+      // Business name includes message words
+      const msgWords=msgLower.split(/\s+/).filter(w=>w.length>1);
+      const bizWords=n.split(/\s+/).filter(w=>w.length>1);
+      // Score: how many business name words appear in message
+      const score=bizWords.filter(w=>msgWords.some(m=>m.includes(w)||w.startsWith(m))).length;
       if(score>best){best=score;matched=b;}
+      // Also try: message contains first word of business name
+      if(bizWords.length>0&&msgLower.includes(bizWords[0])&&score>0){
+        if(score>best){best=score+0.5;matched=b;}
+      }
     }
+    // Minimum score threshold
+    if(best<1)matched=null;
     if(matched&&best>0&&(!session.business||session.business.id!==matched.id)){session.business=matched;session.history=[];}
 
     let dataContext="Business not yet identified.";
