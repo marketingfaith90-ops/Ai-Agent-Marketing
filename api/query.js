@@ -6,24 +6,32 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
   const G = process.env.BITRIX24_MARKETING_GROUP_ID;
   if (!W || !G) return { ads:[], sms:[], google:[] };
   try {
-    // Bitrix24 REST API - use JSON body with proper field names
+    // Bitrix24 REST API - paginate, since tasks.task.list caps at 50 per call
     const url = `${W}tasks.task.list.json`;
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        filter: { GROUP_ID: G }
-      }),
-      signal: AbortSignal.timeout(8000)
-    });
-    const d = await r.json();
-    console.log("Bitrix error:", d.error || "none");
-    console.log("Bitrix error_description:", d.error_description || "none");
-    console.log("Bitrix result type:", Array.isArray(d.result) ? "array" : typeof d.result);
-    console.log("Bitrix result raw:", JSON.stringify(d.result).substring(0, 500));
-    // result may be an array directly, or {tasks:[...]}, depending on Bitrix24 version
-    const all = Array.isArray(d.result) ? d.result : (d.result?.tasks || []);
-    console.log("Bitrix total:", all.length);
+    let all = [];
+    let start = 0;
+    for (let page = 0; page < 10; page++) { // hard cap at 500 tasks, safety net
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filter: { GROUP_ID: G },
+          start
+        }),
+        signal: AbortSignal.timeout(8000)
+      });
+      const d = await r.json();
+      if (page === 0) {
+        console.log("Bitrix error:", d.error || "none");
+        console.log("Bitrix error_description:", d.error_description || "none");
+      }
+      const batch = Array.isArray(d.result) ? d.result : (d.result?.tasks || []);
+      all = all.concat(batch);
+      // Bitrix24 returns "next" when there are more pages
+      if (d.next === undefined || d.next === null || batch.length === 0) break;
+      start = d.next;
+    }
+    console.log("Bitrix total fetched:", all.length);
     console.log("Bitrix raw first item:", JSON.stringify(all[0] || "empty").substring(0, 400));
 
     // NOTE: tasks.task.list returns lowerCamelCase fields (id, title, status,
@@ -34,6 +42,16 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       const title = (t.title||"").toLowerCase().replace(/['\-]/g,"");
       return bizWords.filter(w => title.includes(w)).length >= Math.min(2, bizWords.length);
     });
+    console.log("Bitrix matched for", bizName, ":", matched.length, matched.map(t=>t.title));
+
+    // Filter to the requested month using createdDate
+    const inMonth = matched.filter(t => {
+      if (!t.createdDate) return false;
+      const dt = new Date(t.createdDate);
+      return dt >= monthStart && dt <= monthEnd;
+    });
+    console.log("Bitrix matched in month:", inMonth.length, inMonth.map(t=>t.title));
+
     const sm = {"1":"New","2":"In Progress","3":"Completed","4":"Pending","5":"Completed","6":"Deferred"};
     const f = t => ({
       title: t.title,
@@ -42,9 +60,9 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       deadline: t.deadline?new Date(t.deadline).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}):null
     });
     return {
-      ads: matched.filter(t=>/social media ads|facebook ads|instagram ads|boost/i.test(t.title||"")).map(f),
-      sms: matched.filter(t=>/sms|text marketing/i.test(t.title||"")).map(f),
-      google: matched.filter(t=>/google ads|google ad|gmb/i.test(t.title||"")).map(f)
+      ads: inMonth.filter(t=>/social media ads|facebook ads|instagram ads|boost/i.test(t.title||"")).map(f),
+      sms: inMonth.filter(t=>/sms|text marketing/i.test(t.title||"")).map(f),
+      google: inMonth.filter(t=>/google ads|google ad|gmb/i.test(t.title||"")).map(f)
     };
   } catch(e) { 
     console.error("Bitrix error:", e.message);
