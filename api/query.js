@@ -6,17 +6,27 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
   const G = process.env.BITRIX24_MARKETING_GROUP_ID;
   if (!W || !G) return { ads:[], sms:[], google:[] };
   try {
-    // Bitrix24 REST API - paginate, since tasks.task.list caps at 50 per call
+    // Bitrix24 REST API - filter by creation date server-side so we don't
+    // have to page through the entire group's history (thousands of tasks
+    // across all businesses share this one GROUP_ID).
     const url = `${W}tasks.task.list.json`;
+    const isoStart = monthStart.toISOString().slice(0,19) + "+00:00";
+    const isoEnd = monthEnd.toISOString().slice(0,19) + "+00:00";
     let all = [];
     const seenIds = new Set();
     let start = 0;
-    for (let page = 0; page < 10; page++) { // hard cap at 500 tasks, safety net
+    let dateFilterWorked = true;
+    for (let page = 0; page < 20; page++) { // safety cap
       const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          filter: { GROUP_ID: G },
+          filter: {
+            GROUP_ID: G,
+            ">=CREATED_DATE": isoStart,
+            "<=CREATED_DATE": isoEnd
+          },
+          order: { ID: "desc" },
           start
         }),
         signal: AbortSignal.timeout(8000)
@@ -29,7 +39,6 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       const batch = Array.isArray(d.result) ? d.result : (d.result?.tasks || []);
       console.log(`Bitrix page ${page}: start=${start} batch=${batch.length} next=${d.next} first_id=${batch[0]?.id} last_id=${batch[batch.length-1]?.id}`);
 
-      // stop if this page brought nothing new (protects against a stuck "next")
       const newOnes = batch.filter(t => !seenIds.has(t.id));
       if (newOnes.length === 0) break;
       newOnes.forEach(t => seenIds.add(t.id));
@@ -38,7 +47,7 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       if (d.next === undefined || d.next === null || batch.length === 0) break;
       start = d.next;
     }
-    console.log("Bitrix total fetched (unique):", all.length);
+    console.log("Bitrix total fetched (unique, date-filtered):", all.length);
     console.log("Bitrix all titles:", all.map(t=>t.title).join(" | ").substring(0, 1500));
 
     // NOTE: tasks.task.list returns lowerCamelCase fields (id, title, status,
