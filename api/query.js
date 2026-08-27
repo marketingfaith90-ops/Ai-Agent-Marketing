@@ -19,11 +19,20 @@ async function getBitrixTasks(businessName, monthStart, monthEnd) {
     const tasks = d.result?.tasks || [];
 
     // Filter tasks that mention this business
-    const bizLower = businessName.toLowerCase();
-    const bizTasks = tasks.filter(t => 
-      t.TITLE?.toLowerCase().includes(bizLower) ||
-      t.DESCRIPTION?.toLowerCase().includes(bizLower)
-    );
+    // Remove apostrophes and special chars for flexible matching
+    const bizLower = businessName.toLowerCase().replace(/['\-]/g, "").replace(/\s+/g, " ").trim();
+    const bizWords = bizLower.split(" ").filter(w => w.length > 2);
+    
+    const bizTasks = tasks.filter(t => {
+      const title = t.TITLE?.toLowerCase().replace(/['\-]/g, "").replace(/\s+/g, " ") || "";
+      const desc = t.DESCRIPTION?.toLowerCase().replace(/['\-]/g, "") || "";
+      // Match if title contains business name (with or without apostrophe)
+      if (title.includes(bizLower)) return true;
+      if (desc.includes(bizLower)) return true;
+      // Match by word overlap (handles "Kadirs Kitchen" vs "Kadir's Kitchen")
+      const matchCount = bizWords.filter(w => title.includes(w)).length;
+      return matchCount >= Math.min(2, bizWords.length);
+    });
 
     // Categorise by type
     const ads = [], sms = [], googleAds = [], other = [];
