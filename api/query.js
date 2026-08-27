@@ -27,8 +27,10 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
     const d = await r.json();
     console.log("Bitrix error:", d.error || "none");
     console.log("Bitrix ALL tasks:", d.result?.tasks?.length || 0);
-    console.log("Bitrix first task:", d.result?.tasks?.[0]?.TITLE || "none");
-    console.log("Bitrix second task:", d.result?.tasks?.[1]?.TITLE || "none");
+    const allTasks = d.result?.tasks || [];
+    allTasks.forEach((t,i) => {
+      console.log(`Task ${i+1}: ID=${t.ID} TITLE=${t.TITLE} STATUS=${t.STATUS} CREATED=${t.CREATED_DATE}`);
+    });
     
     // No date filter — get all tasks and filter by month in code
     const all = (d.result?.tasks || []);
