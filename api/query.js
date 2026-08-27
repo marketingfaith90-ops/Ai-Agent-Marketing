@@ -12,14 +12,17 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        filter: { GROUP_ID: G },
-        order: { createdDate: "desc" }
+        filter: { GROUP_ID: G }
       }),
       signal: AbortSignal.timeout(8000)
     });
     const d = await r.json();
     console.log("Bitrix error:", d.error || "none");
-    const all = (d.result?.tasks || []);
+    console.log("Bitrix error_description:", d.error_description || "none");
+    console.log("Bitrix result type:", Array.isArray(d.result) ? "array" : typeof d.result);
+    console.log("Bitrix result raw:", JSON.stringify(d.result).substring(0, 500));
+    // result may be an array directly, or {tasks:[...]}, depending on Bitrix24 version
+    const all = Array.isArray(d.result) ? d.result : (d.result?.tasks || []);
     console.log("Bitrix total:", all.length);
     console.log("Bitrix raw first item:", JSON.stringify(all[0] || "empty").substring(0, 400));
 
