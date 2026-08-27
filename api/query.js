@@ -1,74 +1,6 @@
 const sessions = new Map();
 const BASE = "https://scheduler.ordereautomation.xyz/api";
 
-// Cache all published posts for current month
-let pubCache = null;
-let pubCacheTime = null;
-let schedCache = null;
-let schedCacheTime = null;
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
-
-async function getAllPublishedThisMonth(KEY, monthStart, monthEnd) {
-  if (pubCache && pubCacheTime && (Date.now() - pubCacheTime) < CACHE_TTL) return pubCache;
-  
-  let start = 0, all = [];
-  let keepGoing = true;
-  
-  while (keepGoing && start <= 1000) {
-    const r = await fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=${start}`, { 
-      signal: AbortSignal.timeout(6000) 
-    });
-    const d = await r.json();
-    if (d.error || !d.data || d.data.length === 0) break;
-    
-    // Filter to current month
-    const monthPosts = d.data.filter(p => {
-      const date = new Date(p.published_at || p.created_at);
-      return date >= monthStart && date <= monthEnd;
-    });
-    all = all.concat(monthPosts);
-    
-    // If oldest post in this page is before month start, stop
-    const oldest = new Date(d.data[d.data.length-1].published_at || d.data[d.data.length-1].created_at);
-    if (oldest < monthStart) keepGoing = false;
-    if (d.data.length < 50) keepGoing = false;
-    start += 50;
-  }
-  
-  pubCache = all;
-  pubCacheTime = Date.now();
-  return all;
-}
-
-async function getAllScheduled(KEY) {
-  if (schedCache && schedCacheTime && (Date.now() - schedCacheTime) < CACHE_TTL) return schedCache;
-  
-  let start = 0, all = [];
-  while (start <= 300) {
-    const r = await fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=${start}`, { 
-      signal: AbortSignal.timeout(5000) 
-    });
-    const d = await r.json();
-    if (d.error || !d.data || d.data.length === 0) break;
-    all = all.concat(d.data);
-    if (d.data.length < 50) break;
-    start += 50;
-  }
-  
-  schedCache = all;
-  schedCacheTime = Date.now();
-  return all;
-}
-
-function getPlatforms(post) {
-  const keys = Object.keys(post.platform_post_ids || {});
-  return {
-    facebook: keys.some(k => k.startsWith("facebook_")),
-    instagram: keys.some(k => k.startsWith("instagram_")),
-    gmb: keys.some(k => k.startsWith("gmb_") || k.startsWith("google_"))
-  };
-}
-
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -79,12 +11,7 @@ export default async function handler(req, res) {
   const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 
   if (req.method === "GET") {
-    return res.status(200).json({
-      status: "ORDERE AI Agent Live",
-      version: "22.0",
-      cache_published: pubCache ? `${pubCache.length} posts cached` : "empty",
-      cache_scheduled: schedCache ? `${schedCache.length} posts cached` : "empty"
-    });
+    return res.status(200).json({ status: "ORDERE AI Agent Live", version: "24.0" });
   }
 
   if (req.method !== "POST") return res.status(405).end();
@@ -96,16 +23,15 @@ export default async function handler(req, res) {
   if (!sessions.has(sid)) sessions.set(sid, { history: [], business: null });
   const session = sessions.get(sid);
 
-  try {
-    const now = new Date();
-    const hour = parseInt(now.toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit" }));
-    const timeOfDay = hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
-    const monthName = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
-    const fmt = d => new Date(d).toLocaleDateString("en-GB", { weekday:"short", day:"numeric", month:"short" }) + " at " + new Date(d).toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" });
+  const now = new Date();
+  const hour = parseInt(now.toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit" }));
+  const timeOfDay = hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthName = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  const fmt = d => new Date(d).toLocaleDateString("en-GB", { weekday:"short", day:"numeric", month:"short" }) + " at " + new Date(d).toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" });
 
-    // Find business
+  try {
+    // Step 1: Find business (fast - single call)
     const bizRes = await fetch(`${BASE}/listbusinesses?apiKey=${KEY}`, { signal: AbortSignal.timeout(5000) });
     const bizData = await bizRes.json();
     const businesses = bizData.data || [];
@@ -128,72 +54,60 @@ export default async function handler(req, res) {
     let dataContext = "Business not yet identified.";
 
     if (session.business) {
-      const biz = session.business;
-      const name = biz.business_name;
+      const name = session.business.business_name;
 
-      // Load all posts from cache (built once, reused)
-      const [allPublished, allScheduled] = await Promise.all([
-        getAllPublishedThisMonth(KEY, monthStart, monthEnd),
-        getAllScheduled(KEY)
+      // Step 2: Fetch 4 pages simultaneously (covers 200 posts)
+      // This is fast because all 4 run in parallel
+      const [p0, p1, p2, p3, s0] = await Promise.all([
+        fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=0`, { signal: AbortSignal.timeout(6000) }).then(r=>r.json()).catch(()=>({data:[]})),
+        fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=50`, { signal: AbortSignal.timeout(6000) }).then(r=>r.json()).catch(()=>({data:[]})),
+        fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=100`, { signal: AbortSignal.timeout(6000) }).then(r=>r.json()).catch(()=>({data:[]})),
+        fetch(`${BASE}/listpublishedposts?apiKey=${KEY}&start=150`, { signal: AbortSignal.timeout(6000) }).then(r=>r.json()).catch(()=>({data:[]})),
+        fetch(`${BASE}/listscheduledposts?apiKey=${KEY}&start=0`, { signal: AbortSignal.timeout(6000) }).then(r=>r.json()).catch(()=>({data:[]}))
       ]);
 
-      // Filter by exact business name
-      const published = allPublished.filter(p => 
-        p.business_name?.toLowerCase() === name.toLowerCase()
+      // Combine and filter by business name + current month
+      const allPub = [...(p0.data||[]), ...(p1.data||[]), ...(p2.data||[]), ...(p3.data||[])];
+      const published = allPub.filter(p =>
+        p.business_name?.toLowerCase() === name.toLowerCase() &&
+        new Date(p.published_at || p.created_at) >= monthStart
       );
-      const upcoming = allScheduled.filter(p =>
+
+      const upcoming = (s0.data||[]).filter(p =>
         p.business_name?.toLowerCase() === name.toLowerCase() &&
         new Date(p.scheduled_date_time) >= now
       );
 
       // Split by platform
-      const fbPosts = [], igPosts = [];
+      const fbPosts = [], igPosts = [], gmbPosts = [];
       published.forEach(p => {
-        const plat = getPlatforms(p);
+        const keys = Object.keys(p.platform_post_ids || {});
+        const hasFb = keys.some(k => k.startsWith("facebook_"));
+        const hasIg = keys.some(k => k.startsWith("instagram_"));
+        const hasGmb = keys.some(k => k.startsWith("gmb_") || k.startsWith("google_"));
         const date = fmt(p.published_at || p.created_at);
         const offer = p.content?.match(/🎉[^\n]*/)?.[0] || null;
-        if (plat.facebook || (!plat.facebook && !plat.instagram)) {
-          fbPosts.push({ date, offer });
-        }
-        if (plat.instagram) igPosts.push({ date });
+        if (hasFb || (!hasFb && !hasIg && !hasGmb)) fbPosts.push({ date, offer });
+        if (hasIg) igPosts.push({ date });
+        if (hasGmb) gmbPosts.push({ date });
       });
 
       dataContext = `LIVE DATA FOR: ${name} — ${monthName}\n\n`;
-
-      dataContext += `FACEBOOK POSTS THIS MONTH (${fbPosts.length}):\n`;
-      if (fbPosts.length > 0) {
-        fbPosts.forEach((p, i) => {
-          dataContext += `${i+1}. ${p.date}${p.offer ? ' — ' + p.offer : ''}\n`;
-        });
-      } else {
-        dataContext += `No Facebook posts this month\n`;
-      }
-      dataContext += "\n";
-
-      dataContext += `INSTAGRAM POSTS THIS MONTH (${igPosts.length}):\n`;
-      if (igPosts.length > 0) {
-        igPosts.forEach((p, i) => {
-          dataContext += `${i+1}. ${p.date}\n`;
-        });
-      } else {
-        dataContext += `No Instagram posts this month\n`;
-      }
-      dataContext += "\n";
-
-      dataContext += `TOTAL PUBLISHED: ${published.length} posts\n\n`;
-
+      dataContext += `FACEBOOK (${fbPosts.length}):\n`;
+      fbPosts.length > 0 ? fbPosts.forEach((p,i) => { dataContext += `${i+1}. ${p.date}${p.offer?' — '+p.offer:''}\n`; }) : (dataContext += "None this month\n");
+      dataContext += `\nINSTAGRAM (${igPosts.length}):\n`;
+      igPosts.length > 0 ? igPosts.forEach((p,i) => { dataContext += `${i+1}. ${p.date}\n`; }) : (dataContext += "None this month\n");
+      dataContext += `\nGOOGLE BUSINESS PROFILE (${gmbPosts.length}):\n`;
+      gmbPosts.length > 0 ? gmbPosts.forEach((p,i) => { dataContext += `${i+1}. ${p.date}\n`; }) : (dataContext += "None this month\n");
+      dataContext += `\nTOTAL PUBLISHED: ${published.length} posts\n\n`;
       dataContext += `UPCOMING SCHEDULED (${upcoming.length}):\n`;
-      if (upcoming.length > 0) {
-        upcoming.forEach((p, i) => {
-          const offer = p.content?.match(/🎉[^\n]*/)?.[0] || "no offer";
-          dataContext += `${i+1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
-        });
-      } else {
-        dataContext += `No upcoming posts scheduled\n`;
-      }
+      upcoming.length > 0 ? upcoming.forEach((p,i) => {
+        const offer = p.content?.match(/🎉[^\n]*/)?.[0] || "no offer";
+        dataContext += `${i+1}. ${fmt(p.scheduled_date_time)} — ${offer}\n`;
+      }) : (dataContext += "None\n");
     }
 
-    const systemPrompt = `You are the ORDERE AI Assistant — professional WhatsApp assistant for ORDERE, a UK Online Ordering and Marketing Solution for 700+ restaurants. ORDERE has two departments: Marketing and Support.
+    const systemPrompt = `You are the ORDERE AI Assistant — professional WhatsApp assistant for ORDERE, a UK Online Ordering and Marketing Solution for 700+ restaurants. ORDERE has Marketing and Support departments.
 
 TIME: ${now.toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" })} UK (${timeOfDay})
 TODAY: ${now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
@@ -204,15 +118,15 @@ TONE: Professional. Direct. Plain text only. No emojis. No asterisks. WhatsApp s
 
 CONVERSATION:
 No business yet: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
-Business with query: Skip greeting. Answer directly with live data.
-Business name alone: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
+Business with query: Skip greeting. Answer directly.
+Business alone: "Thank you. I have found your account — ${session.business?.business_name || "your business"}. How can I help you today?"
 Business already known: Answer directly. Never ask for name again.
 
 MARKETING UPDATE FORMAT:
 "Here is your marketing update for [Business Name] — [Month].
 
 Facebook: [X] posts published this month
-[list each with date and time]
+[list with dates]
 
 Instagram: [X] posts published this month
 [list or say none]
@@ -236,7 +150,7 @@ ANY OTHER QUESTION: Full AI intelligence. Give real value. Never refuse.
 RULES:
 - Plain text only. No emojis. No asterisks.
 - Never mention JustEat, Uber Eats, Deliveroo.
-- Only use live data — never invent numbers or dates.
+- Only use live data — never invent.
 - Never give unsolicited advice.
 - Never ask for business name again once identified.
 - Always end: "Is there anything else I can help you with?"
