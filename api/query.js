@@ -14,7 +14,7 @@ function extractTitleDate(title) {
   return null;
 }
 
-async function getBitrixTasks(bizName, monthStart, monthEnd, postcode) {
+async function getBitrixTasks(bizName, monthStart, monthEnd) {
   const W = process.env.BITRIX24_WEBHOOK;
   const G = process.env.BITRIX24_MARKETING_GROUP_ID;
   if (!W || !G) return { ads:[], sms:[], google:[] };
@@ -134,7 +134,7 @@ export default async function handler(req, res) {
   if (!message) return res.status(400).json({error:"No message"});
 
   const sid=sessionId||"default";
-  if (!sessions.has(sid)) sessions.set(sid,{history:[],business:null,postcode:null});
+  if (!sessions.has(sid)) sessions.set(sid,{history:[],business:null});
   const session=sessions.get(sid);
 
   const now=new Date();
@@ -168,12 +168,6 @@ export default async function handler(req, res) {
     }
     if(best<1)matched=null;
     if(matched&&best>0&&(!session.business||session.business.id!==matched.id)){session.business=matched;session.history=[];}
-    // Extract postcode from message (UK format: letters+numbers e.g. PO4 0JP)
-    const postcodeMatch = message.match(/([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})/i);
-    if (postcodeMatch) {
-      session.postcode = postcodeMatch[1].toUpperCase().replace(/\s/g,"");
-      console.log("Postcode detected:", session.postcode);
-    }
 
     let dataContext="Business not yet identified.";
 
@@ -192,7 +186,7 @@ export default async function handler(req, res) {
         fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=350`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
         fetch(`${SP}/listscheduledposts?apiKey=${KEY}&start=0`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
         fetch(`${SP}/listaccounts?apiKey=${KEY}&business_id=${biz.id}`,{signal:AbortSignal.timeout(5000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        getBitrixTasks(name,monthStart,monthEnd,session.postcode)
+        getBitrixTasks(name,monthStart,monthEnd)
       ]);
 
       const allPub=[...(p0.data||[]),...(p1.data||[]),...(p2.data||[]),...(p3.data||[]),...(p4.data||[]),...(p5.data||[]),...(p6.data||[]),...(p7.data||[])];
@@ -254,8 +248,10 @@ CONVERSATION:
 No business yet: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
 Business with query: Skip greeting. Answer directly.
 Business alone: "Thank you. I have found your account — ${session.business?.business_name||"your business"}. How can I help you today?"
-Business already known: Answer directly. Never ask for name again.
-No business in message but needs account data: "Could you please confirm which business you are referring to and your postcode?"
+Business already known AND same business: Answer directly.
+New business name given in message: Switch to new business immediately and answer their query.
+No business name in message at all and needs account data: "Could you please confirm which business you are referring to and your postcode?"
+NEVER say "The business asking is not X" — just switch to the new business mentioned.
 
 MARKETING UPDATE FORMAT:
 "Here is your marketing update for [Business Name] — [Month].
