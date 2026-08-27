@@ -8,15 +8,25 @@ async function getBitrixTasks(businessName, monthStart, monthEnd) {
   if (!WEBHOOK || !GROUP_ID) return { ads: [], sms: [], googleAds: [], other: [] };
 
   try {
-    const since = monthStart.toISOString().split("T")[0];
-    const until = monthEnd.toISOString().split("T")[0];
-
-    // Search tasks in marketing department group
-    const url = `${WEBHOOK}tasks.task.list?filter[GROUP_ID]=${GROUP_ID}&filter[>=CREATED_DATE]=${since}&filter[<=CREATED_DATE]=${until}&select[]=ID&select[]=TITLE&select[]=STATUS&select[]=CREATED_DATE&select[]=DEADLINE&select[]=DESCRIPTION`;
-    
-    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    // Use POST method with JSON body - most reliable Bitrix24 format
+    const r = await fetch(`${WEBHOOK}tasks.task.list`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filter: { GROUP_ID: parseInt(GROUP_ID) },
+        select: ["ID", "TITLE", "STATUS", "CREATED_DATE", "DEADLINE", "DESCRIPTION"],
+        order: { CREATED_DATE: "desc" }
+      }),
+      signal: AbortSignal.timeout(8000)
+    });
     const d = await r.json();
-    const tasks = d.result?.tasks || [];
+    const allTasks = d.result?.tasks || [];
+    
+    // Filter by month
+    const tasks = allTasks.filter(t => {
+      const date = new Date(t.CREATED_DATE);
+      return date >= monthStart && date <= monthEnd;
+    });
 
     // Filter tasks that mention this business
     // Remove apostrophes and special chars for flexible matching
