@@ -6,13 +6,27 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
   const G = process.env.BITRIX24_MARKETING_GROUP_ID;
   if (!W || !G) return { ads:[], sms:[], google:[] };
   try {
-    const r = await fetch(`${W}tasks.task.list`, {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ filter:{ GROUP_ID: G }, select:["ID","TITLE","STATUS","CREATED_DATE","DEADLINE"] }),
+    // Bitrix24 REST API - standard format
+    const url = `${W}tasks.task.list.json`;
+    const body = new URLSearchParams();
+    body.append("filter[GROUP_ID]", G);
+    body.append("select[]", "ID");
+    body.append("select[]", "TITLE");
+    body.append("select[]", "STATUS");
+    body.append("select[]", "CREATED_DATE");
+    body.append("select[]", "DEADLINE");
+    body.append("order[CREATED_DATE]", "desc");
+    
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
       signal: AbortSignal.timeout(8000)
     });
     const d = await r.json();
+    console.log("Bitrix error:", d.error || "none");
+    console.log("Bitrix tasks:", d.result?.tasks?.length || 0);
+    console.log("Bitrix first task:", d.result?.tasks?.[0]?.TITLE || "none");
     const all = (d.result?.tasks || []).filter(t => {
       const dt = new Date(t.CREATED_DATE);
       return dt >= monthStart && dt <= monthEnd;
@@ -35,7 +49,10 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       sms: matched.filter(t=>/sms|text marketing/i.test(t.TITLE)).map(f),
       google: matched.filter(t=>/google ads|google ad|gmb/i.test(t.TITLE)).map(f)
     };
-  } catch(e) { return { ads:[], sms:[], google:[] }; }
+  } catch(e) { 
+    console.error("Bitrix error:", e.message);
+    return { ads:[], sms:[], google:[], error: e.message }; 
+  }
 }
 
 export default async function handler(req, res) {
@@ -160,6 +177,7 @@ export default async function handler(req, res) {
       dataContext+=`\nTOTAL PUBLISHED: ${published.length} posts\n\n`;
       dataContext+=`UPCOMING SCHEDULED (${upcoming.length}):\n`;
       upcoming.length>0?upcoming.forEach((p,i)=>{const o=p.content?.match(/🎉[^\n]*/)?.[0]||"no offer";dataContext+=`${i+1}. ${fmt(p.scheduled_date_time)} — ${o}\n`}):(dataContext+="None\n");
+      dataContext+=`\nBITRIX DEBUG: ads=${bitrix.ads.length} sms=${bitrix.sms.length} google=${bitrix.google.length} error=${bitrix.error||"none"}\n`;
       dataContext+=`\nADS CAMPAIGNS (${bitrix.ads.length}):\n`;
       bitrix.ads.length>0?bitrix.ads.forEach((t,i)=>{dataContext+=`${i+1}. ${t.title} — ${t.status}${t.deadline?" | Deadline: "+t.deadline:""}\n`}):(dataContext+="None this month\n");
       dataContext+=`\nSMS MARKETING (${bitrix.sms.length}):\n`;
