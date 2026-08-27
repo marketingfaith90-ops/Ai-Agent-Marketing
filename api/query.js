@@ -1,30 +1,45 @@
 const sessions = new Map();
 const SP = "https://scheduler.ordereautomation.xyz/api";
 
+// Extract date from task title like "SMS Marketing (14/08/2026)" or "SMS Marketing (20/08/2026)"
+function extractTitleDate(title) {
+  if (!title) return null;
+  // Match (DD/MM/YYYY) or (DD-MM-YYYY)
+  const m = title.match(/\((\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})\)/);
+  if (m) return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]));
+  // Match (Month YYYY) like (August 2026)
+  const months = {january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11};
+  const m2 = title.match(/\((\w+)\s+(\d{4})\)/i);
+  if (m2 && months[m2[1].toLowerCase()] !== undefined) return new Date(parseInt(m2[2]), months[m2[1].toLowerCase()], 1);
+  return null;
+}
+
 async function getBitrixTasks(bizName, monthStart, monthEnd) {
   const W = process.env.BITRIX24_WEBHOOK;
   const G = process.env.BITRIX24_MARKETING_GROUP_ID;
   if (!W || !G) return { ads:[], sms:[], google:[] };
   try {
-    // Bitrix24 REST API - filter by creation date server-side so we don't
-    // have to page through the entire group's history (thousands of tasks
-    // across all businesses share this one GROUP_ID).
     const url = `${W}tasks.task.list.json`;
-    const isoStart = monthStart.toISOString().slice(0,19) + "+00:00";
-    const isoEnd = monthEnd.toISOString().slice(0,19) + "+00:00";
+
+    // Step 1: Fetch ALL tasks for this group by this business name.
+    // No date filter — we'll use title date instead (createdDate ≠ campaign date).
+    // We filter by SEARCH_INDEX which does a title keyword search server-side,
+    // drastically reducing the result set to just this business's tasks.
+    const bizWords = bizName.toLowerCase().replace(/['\-]/g,"").split(" ").filter(w => w.length > 2);
+    // Use the longest word (most distinctive) as the server-side search term
+    const searchTerm = bizWords.reduce((a,b) => a.length >= b.length ? a : b, "");
+
     let all = [];
     const seenIds = new Set();
     let start = 0;
-    let dateFilterWorked = true;
-    for (let page = 0; page < 20; page++) { // safety cap
+    for (let page = 0; page < 20; page++) {
       const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filter: {
             GROUP_ID: G,
-            ">=CREATED_DATE": isoStart,
-            "<=CREATED_DATE": isoEnd
+            "TITLE": `%${searchTerm}%`  // LIKE search on title
           },
           order: { ID: "desc" },
           start
@@ -33,11 +48,11 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       });
       const d = await r.json();
       if (page === 0) {
-        console.log("Bitrix error:", d.error || "none");
-        console.log("Bitrix error_description:", d.error_description || "none");
+        console.log("Bitrix title-search error:", d.error || "none");
+        console.log("Bitrix title-search total:", d.total);
       }
       const batch = Array.isArray(d.result) ? d.result : (d.result?.tasks || []);
-      console.log(`Bitrix page ${page}: start=${start} batch=${batch.length} next=${d.next} first_id=${batch[0]?.id} last_id=${batch[batch.length-1]?.id}`);
+      console.log(`Bitrix page ${page}: start=${start} batch=${batch.length} next=${d.next}`);
 
       const newOnes = batch.filter(t => !seenIds.has(t.id));
       if (newOnes.length === 0) break;
@@ -47,42 +62,48 @@ async function getBitrixTasks(bizName, monthStart, monthEnd) {
       if (d.next === undefined || d.next === null || batch.length === 0) break;
       start = d.next;
     }
-    console.log("Bitrix total fetched (unique, date-filtered):", all.length);
-    console.log("Bitrix all titles:", all.map(t=>t.title).join(" | ").substring(0, 1500));
+    console.log("Bitrix total fetched (title-filtered):", all.length);
+    console.log("Bitrix all titles:", all.map(t=>t.title).join(" | ").substring(0, 2000));
 
-    // NOTE: tasks.task.list returns lowerCamelCase fields (id, title, status,
-    // createdDate, deadline) — NOT the UPPER_CASE fields used by CRM methods.
-    const biz = bizName.toLowerCase().replace(/['\-]/g,"");
-    const bizWords = biz.split(" ").filter(w => w.length > 2);
+    // Step 2: Local name match (double-check — server search may return partial matches)
     const matched = all.filter(t => {
       const title = (t.title||"").toLowerCase().replace(/['\-]/g,"");
       return bizWords.filter(w => title.includes(w)).length >= Math.min(2, bizWords.length);
     });
     console.log("Bitrix matched for", bizName, ":", matched.length, matched.map(t=>t.title));
 
-    // Filter to the requested month using createdDate
+    // Step 3: Filter to the requested month using TITLE DATE first, fallback to createdDate
     const inMonth = matched.filter(t => {
-      if (!t.createdDate) return false;
-      const dt = new Date(t.createdDate);
+      const titleDate = extractTitleDate(t.title);
+      const dt = titleDate || (t.createdDate ? new Date(t.createdDate) : null);
+      if (!dt) return false;
+      const used = titleDate ? "title" : "createdDate";
+      console.log(`  Task "${t.title}" → date source: ${used} → ${dt.toISOString().slice(0,10)}`);
       return dt >= monthStart && dt <= monthEnd;
     });
     console.log("Bitrix matched in month:", inMonth.length, inMonth.map(t=>t.title));
 
     const sm = {"1":"New","2":"In Progress","3":"Completed","4":"Pending","5":"Completed","6":"Deferred"};
-    const f = t => ({
-      title: t.title,
-      status: sm[t.status]||t.status,
-      date: t.createdDate?new Date(t.createdDate).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}):null,
-      deadline: t.deadline?new Date(t.deadline).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}):null
-    });
+    const f = t => {
+      const titleDate = extractTitleDate(t.title);
+      const displayDate = titleDate
+        ? titleDate.toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})
+        : (t.createdDate ? new Date(t.createdDate).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : null);
+      return {
+        title: t.title,
+        status: sm[t.status]||t.status,
+        date: displayDate,
+        deadline: t.deadline ? new Date(t.deadline).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : null
+      };
+    };
     return {
       ads: inMonth.filter(t=>/social media ads|facebook ads|instagram ads|boost/i.test(t.title||"")).map(f),
       sms: inMonth.filter(t=>/sms|text marketing/i.test(t.title||"")).map(f),
       google: inMonth.filter(t=>/google ads|google ad|gmb/i.test(t.title||"")).map(f)
     };
-  } catch(e) { 
+  } catch(e) {
     console.error("Bitrix error:", e.message);
-    return { ads:[], sms:[], google:[], error: e.message }; 
+    return { ads:[], sms:[], google:[], error: e.message };
   }
 }
 
@@ -99,7 +120,7 @@ export default async function handler(req, res) {
 
   if (req.method==="GET") {
     return res.status(200).json({
-      status:"ORDERE AI Agent Live", version:"26.0",
+      status:"ORDERE AI Agent Live", version:"27.0",
       anthropic:CLAUDE?"SET":"MISSING", schedulepro:KEY?"SET":"MISSING",
       bitrix_webhook:BW?"SET: "+BW.substring(0,40)+"...":"MISSING",
       bitrix_group:BG||"MISSING"
@@ -134,20 +155,15 @@ export default async function handler(req, res) {
     let matched=null,best=0;
     for(const b of businesses){
       const n=b.business_name.toLowerCase();
-      // Exact include match
       if(msgLower.includes(n)){matched=b;best=99;break;}
-      // Business name includes message words
       const msgWords=msgLower.split(/\s+/).filter(w=>w.length>1);
       const bizWords=n.split(/\s+/).filter(w=>w.length>1);
-      // Score: how many business name words appear in message
       const score=bizWords.filter(w=>msgWords.some(m=>m.includes(w)||w.startsWith(m))).length;
       if(score>best){best=score;matched=b;}
-      // Also try: message contains first word of business name
       if(bizWords.length>0&&msgLower.includes(bizWords[0])&&score>0){
         if(score>best){best=score+0.5;matched=b;}
       }
     }
-    // Minimum score threshold
     if(best<1)matched=null;
     if(matched&&best>0&&(!session.business||session.business.id!==matched.id)){session.business=matched;session.history=[];}
 
