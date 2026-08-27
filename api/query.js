@@ -84,7 +84,16 @@ export default async function handler(req, res) {
   const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 
   if (req.method === "GET") {
-    return res.status(200).json({ status: "ORDERE AI Agent Live", version: "25.0" });
+    const WEBHOOK = process.env.BITRIX24_WEBHOOK;
+    const GROUP_ID = process.env.BITRIX24_MARKETING_GROUP_ID;
+    return res.status(200).json({ 
+      status: "ORDERE AI Agent Live", 
+      version: "25.0",
+      bitrix_webhook: WEBHOOK ? "SET - " + WEBHOOK.substring(0, 40) + "..." : "NOT SET",
+      bitrix_group_id: GROUP_ID || "NOT SET",
+      anthropic: process.env.ANTHROPIC_API_KEY ? "SET" : "NOT SET",
+      schedulepro: process.env.SCHEDULEPRO_API_KEY ? "SET" : "NOT SET"
+    });
   }
 
   if (req.method !== "POST") return res.status(405).end();
