@@ -175,32 +175,30 @@ export default async function handler(req, res) {
       const biz=session.business;
       const name=biz.business_name;
 
-      const [p0,p1,p2,p3,p4,p5,p6,p7,s0,accRes,bitrix]=await Promise.all([
-        fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=0`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=50`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=100`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=150`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=200`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=250`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=300`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        fetch(`${SP}/listpublishedposts?apiKey=${KEY}&start=350`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
-        fetch(`${SP}/listscheduledposts?apiKey=${KEY}&start=0`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
+      // Use business_id filter - now supported by SchedulePro
+      const [accRes, schedRes, bitrix] = await Promise.all([
         fetch(`${SP}/listaccounts?apiKey=${KEY}&business_id=${biz.id}`,{signal:AbortSignal.timeout(5000)}).then(r=>r.json()).catch(()=>({data:[]})),
+        fetch(`${SP}/listscheduledposts?apiKey=${KEY}&business_id=${biz.id}&start=0`,{signal:AbortSignal.timeout(6000)}).then(r=>r.json()).catch(()=>({data:[]})),
         getBitrixTasks(name,monthStart,monthEnd)
       ]);
 
-      const allPub=[...(p0.data||[]),...(p1.data||[]),...(p2.data||[]),...(p3.data||[]),...(p4.data||[]),...(p5.data||[]),...(p6.data||[]),...(p7.data||[])];
+      // Fetch all published posts for this business using business_id filter
+      let published = [];
+      let pubStart = 0;
+      while (true) {
+        const pubRes = await fetch(`${SP}/listpublishedposts?apiKey=${KEY}&business_id=${biz.id}&start=${pubStart}`,{signal:AbortSignal.timeout(8000)}).then(r=>r.json()).catch(()=>({data:[]}));
+        if (!pubRes.data || pubRes.data.length === 0) break;
+        const monthPosts = pubRes.data.filter(p => {
+          const dt = new Date(p.published_at || p.created_at);
+          return dt >= monthStart && dt <= monthEnd;
+        });
+        published = published.concat(monthPosts);
+        const oldest = new Date(pubRes.data[pubRes.data.length-1].published_at || pubRes.data[pubRes.data.length-1].created_at);
+        if (oldest < monthStart || pubRes.data.length < 50) break;
+        pubStart += 50;
+      }
+
       const accounts=accRes.data||[];
-      const fbPageId=accounts.find(a=>a.platform==="facebook")?.account_id;
-
-      const published=allPub.filter(p=>{
-        const dt=new Date(p.published_at||p.created_at);
-        if(dt<monthStart||dt>monthEnd)return false;
-        if(p.business_name?.toLowerCase()===name.toLowerCase())return true;
-        if(fbPageId){const keys=Object.keys(p.platform_post_ids||{});if(keys.some(k=>k.includes(fbPageId)))return true;}
-        return false;
-      });
-
       const upcoming=(schedRes.data||[]).filter(p=>new Date(p.scheduled_date_time)>=now);
 
       const fbP=[],igP=[],gmbP=[];
