@@ -155,18 +155,25 @@ export default async function handler(req, res) {
     const bizRes=await fetch(`${SP}/listbusinesses?apiKey=${KEY}`,{signal:AbortSignal.timeout(5000)});
     const businesses=(await bizRes.json()).data||[];
     let matched=null,best=0;
+    const msgWords=msgLower.split(/\s+/).filter(w=>w.length>2);
     for(const b of businesses){
       const n=b.business_name.toLowerCase();
+      // Exact full name match
       if(msgLower.includes(n)){matched=b;best=99;break;}
-      const msgWords=msgLower.split(/\s+/).filter(w=>w.length>1);
-      const bizWords=n.split(/\s+/).filter(w=>w.length>1);
-      const score=bizWords.filter(w=>msgWords.some(m=>m.includes(w)||w.startsWith(m))).length;
-      if(score>best){best=score;matched=b;}
-      if(bizWords.length>0&&msgLower.includes(bizWords[0])&&score>0){
-        if(score>best){best=score+0.5;matched=b;}
+      const bizWords=n.split(/\s+/).filter(w=>w.length>2);
+      let score=0;
+      for(const bw of bizWords){
+        for(const mw of msgWords){
+          if(mw===bw) score+=2; // exact word match
+          else if(mw.includes(bw)||bw.includes(mw)) score+=1;
+        }
       }
+      // Strong bonus if first distinctive word matches exactly
+      if(bizWords[0]&&msgWords.includes(bizWords[0])) score+=3;
+      if(score>best){best=score;matched=b;}
     }
-    if(best<1)matched=null;
+    // Require minimum score to avoid weak matches like "Indian" matching wrong business
+    if(best<3)matched=null;
     if(matched&&best>0&&(!session.business||session.business.id!==matched.id)){session.business=matched;session.history=[];}
 
     let dataContext="Business not yet identified.";
