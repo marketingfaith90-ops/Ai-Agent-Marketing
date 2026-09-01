@@ -201,7 +201,7 @@ export default async function handler(req, res) {
         return false;
       });
 
-      const upcoming=(s0.data||[]).filter(p=>p.business_name?.toLowerCase()===name.toLowerCase()&&new Date(p.scheduled_date_time)>=now);
+      const upcoming=(schedRes.data||[]).filter(p=>new Date(p.scheduled_date_time)>=now);
 
       const fbP=[],igP=[],gmbP=[];
       published.forEach(p=>{
@@ -248,10 +248,8 @@ CONVERSATION:
 No business yet: "Good ${timeOfDay}. Welcome to ORDERE. How can I assist you today? Please share your business name and postcode."
 Business with query: Skip greeting. Answer directly.
 Business alone: "Thank you. I have found your account — ${session.business?.business_name||"your business"}. How can I help you today?"
-Business already known AND same business: Answer directly.
-New business name given in message: Switch to new business immediately and answer their query.
-No business name in message at all and needs account data: "Could you please confirm which business you are referring to and your postcode?"
-NEVER say "The business asking is not X" — just switch to the new business mentioned.
+Business already known: Answer directly. Never ask for name again.
+No business in message but needs account data: "Could you please confirm which business you are referring to and your postcode?"
 
 MARKETING UPDATE FORMAT:
 "Here is your marketing update for [Business Name] — [Month].
